@@ -2,5 +2,5 @@ fastapi
 uvicorn
 python-dotenv
 openai
-parselmouth
+praat-parselmouth
 numpy
