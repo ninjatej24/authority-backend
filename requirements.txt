@@ -4,3 +4,4 @@ python-dotenv
 openai
 praat-parselmouth
 numpy
+python-multipart
