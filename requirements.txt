@@ -5,3 +5,4 @@ openai
 praat-parselmouth
 numpy
 python-multipart
+ffmpeg-python
