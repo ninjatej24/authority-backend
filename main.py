@@ -7,6 +7,21 @@ from scoring import compute_authority_score
 from feedback_engine import generate_feedback
 import tempfile
 import os
+import subprocess
+
+def convert_to_wav(input_path):
+    output_path = input_path + ".wav"
+
+    subprocess.run([
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-ar", "16000",
+        "-ac", "1",
+        output_path
+    ], check=True)
+
+    return output_path
 
 # Load environment variables
 load_dotenv()
@@ -29,10 +44,13 @@ async def analyze_voice(file: UploadFile = File(...)):
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    voice_metrics = extract_voice_metrics(tmp_path)
+    # Convert audio to WAV (needed for Parselmouth)
+    wav_path = convert_to_wav(tmp_path)
+
+    voice_metrics = extract_voice_metrics(wav_path)
 
     # Open saved audio file
-    audio_file = open(tmp_path, "rb")
+    audio_file = open(wav_path, "rb")
 
     # Send to Whisper
     transcript = client.audio.transcriptions.create(
