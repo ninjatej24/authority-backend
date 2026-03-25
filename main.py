@@ -9,6 +9,7 @@ import tempfile
 import os
 import subprocess
 
+
 def convert_to_wav(input_path):
     output_path = input_path + ".wav"
 
@@ -22,6 +23,7 @@ def convert_to_wav(input_path):
     ], check=True)
 
     return output_path
+
 
 # Load environment variables
 load_dotenv()
@@ -47,62 +49,69 @@ async def analyze_voice(file: UploadFile = File(...)):
     # Convert audio to WAV (needed for Parselmouth)
     wav_path = convert_to_wav(tmp_path)
 
+    # Extract voice metrics
     voice_metrics = extract_voice_metrics(wav_path)
 
     # Open saved audio file
     audio_file = open(wav_path, "rb")
 
-    # Send to Whisper
+    # Transcribe with Whisper
     transcript = client.audio.transcriptions.create(
         model="whisper-1",
         file=audio_file
     )
 
+    # Cognitive analysis (GPT)
     cognitive_metrics = analyze_cognition(transcript.text)
 
-    authority_score = compute_authority_score(
-    voice_metrics,
-    cognitive_metrics,
-    {
-        "words_per_minute": wpm,
-        "filler_density": filler_density
-    }
-)
-
+    # =========================
+    # 🧠 DELIVERY METRICS (FIXED ORDER)
+    # =========================
     word_count = len(transcript.text.split())
-
     duration = voice_metrics["duration_seconds"]
 
-    wpm = (word_count / duration) * 60
+    wpm = (word_count / max(duration, 1)) * 60
 
-    # Detect filler words
     filler_words = ["um", "uh", "like", "you know", "sort of", "kind of"]
-
     transcript_lower = transcript.text.lower()
 
     filler_count = sum(transcript_lower.count(word) for word in filler_words)
-
     filler_density = filler_count / max(word_count, 1)
 
+    # =========================
+    # 🎯 SCORING (NOW CORRECT)
+    # =========================
+    authority_score = compute_authority_score(
+        voice_metrics,
+        cognitive_metrics,
+        {
+            "words_per_minute": wpm,
+            "filler_density": filler_density
+        }
+    )
+
+    # =========================
+    # 💬 FEEDBACK
+    # =========================
     feedback = generate_feedback(
-    transcript.text,
-    voice_metrics,
-    {
-        "words_per_minute": wpm,
-        "filler_density": filler_density
-    },
-    cognitive_metrics,
-    authority_score
-)
+        transcript.text,
+        voice_metrics,
+        {
+            "words_per_minute": wpm,
+            "filler_density": filler_density
+        },
+        cognitive_metrics,
+        authority_score
+    )
 
     return {
-    "transcript": transcript.text,
-    "voice_metrics": voice_metrics,
-    "cognitive_metrics": cognitive_metrics,
-    "delivery_metrics": {
-        "words_per_minute": wpm,
-        "filler_density": filler_density
-    },
-    "authority_score": authority_score,
-    "feedback": feedback
-}
+        "transcript": transcript.text,
+        "voice_metrics": voice_metrics,
+        "cognitive_metrics": cognitive_metrics,
+        "delivery_metrics": {
+            "words_per_minute": wpm,
+            "filler_density": filler_density
+        },
+        "authority_score": authority_score,
+        "feedback": feedback
+    }
