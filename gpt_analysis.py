@@ -10,26 +10,50 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 def analyze_cognition(transcript):
 
     prompt = f"""
-You are an expert communication analyst.
+You are an elite communication analyst.
 
-Evaluate the following speech transcript across these dimensions.
+You must STRICTLY evaluate the speech. Do NOT inflate scores.
 
-Score each from 0 to 100.
+Most people score between 50–75.
+Scores above 80 are rare and require exceptional communication.
+Scores below 50 should be given if the speech is weak, unclear, or rambling.
 
-Clarity – how clearly the idea is communicated  
-Persuasion – how convincing the speech is  
-Articulation – vocabulary quality and precision  
-Idea Density – how much meaningful information is delivered  
-Structure – logical organization of thoughts  
+Evaluate the transcript across these dimensions:
+
+Clarity:
+- Is the message easy to understand?
+
+Persuasion:
+- Is the speech convincing, confident, and impactful?
+
+Coherence:
+- Does the speech flow logically and connect well?
+
+Idea Strength:
+- Is there a strong, meaningful point being made?
+
+Conciseness:
+- Is the speech tight and efficient, or rambling and bloated?
+
+---
+
+Also detect FAILURE:
+Mark failure = true if:
+- No clear point is made
+- Speech is mostly rambling or filler
+- Very low meaningful content
+
+---
 
 Return ONLY valid JSON in this format:
 
 {{
- "clarity": number,
- "persuasion": number,
- "articulation": number,
- "idea_density": number,
- "structure": number
+  "clarity": {{"score": number, "reason": "string"}},
+  "persuasion": {{"score": number, "reason": "string"}},
+  "coherence": {{"score": number, "reason": "string"}},
+  "idea_strength": {{"score": number, "reason": "string"}},
+  "conciseness": {{"score": number, "reason": "string"}},
+  "failure": boolean
 }}
 
 Speech:
@@ -42,4 +66,19 @@ Speech:
         temperature=0
     )
 
-    return json.loads(response.choices[0].message.content)
+    content = response.choices[0].message.content
+
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        # fallback in case GPT messes up JSON
+        parsed = {
+            "clarity": {"score": 60, "reason": "Parsing fallback"},
+            "persuasion": {"score": 60, "reason": "Parsing fallback"},
+            "coherence": {"score": 60, "reason": "Parsing fallback"},
+            "idea_strength": {"score": 60, "reason": "Parsing fallback"},
+            "conciseness": {"score": 60, "reason": "Parsing fallback"},
+            "failure": False
+        }
+
+    return parsed

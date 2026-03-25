@@ -60,7 +60,14 @@ async def analyze_voice(file: UploadFile = File(...)):
 
     cognitive_metrics = analyze_cognition(transcript.text)
 
-    authority_score = compute_authority_score(voice_metrics, cognitive_metrics)
+    authority_score = compute_authority_score(
+    voice_metrics,
+    cognitive_metrics,
+    {
+        "words_per_minute": wpm,
+        "filler_density": filler_density
+    }
+)
 
     word_count = len(transcript.text.split())
 
