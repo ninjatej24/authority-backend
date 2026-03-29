@@ -1,16 +1,19 @@
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
 def compute_authority_score(voice_metrics, cognitive_metrics, delivery_metrics):
     # =========================
-    # 🧠 COGNITIVE SCORES
+    # 🧠 CONTENT / TRANSCRIPT
     # =========================
     clarity = cognitive_metrics["clarity"]["score"]
     persuasion = cognitive_metrics["persuasion"]["score"]
     coherence = cognitive_metrics["coherence"]["score"]
     idea_strength = cognitive_metrics["idea_strength"]["score"]
     conciseness = cognitive_metrics["conciseness"]["score"]
-
     failure = cognitive_metrics.get("failure", False)
 
-    cognitive_score = (
+    content_score = (
         clarity +
         persuasion +
         coherence +
@@ -19,112 +22,122 @@ def compute_authority_score(voice_metrics, cognitive_metrics, delivery_metrics):
     ) / 5
 
     # =========================
-    # 🎤 DELIVERY INPUTS
+    # 🎤 RAW DELIVERY INPUTS
     # =========================
-    wpm = delivery_metrics["words_per_minute"]
-    filler_density = delivery_metrics["filler_density"]
+    wpm = delivery_metrics.get("words_per_minute", 0)
+    filler_density = delivery_metrics.get("filler_density", 0)
 
     pitch_variation = voice_metrics.get("pitch_variation", 0)
     energy_mean = voice_metrics.get("energy_mean", 0)
+    energy_variation = voice_metrics.get("energy_variation", 0)
     silence_ratio = voice_metrics.get("silence_ratio", 0)
     avg_pause = voice_metrics.get("avg_pause_duration", 0)
     pause_frequency = voice_metrics.get("pause_frequency", 0)
-    energy_variation = voice_metrics.get("energy_variation", 0)
 
     # =========================
-    # 🎤 BASIC DELIVERY SCORING
+    # 🎯 DELIVERY SUBSCORES
     # =========================
-    # Controlled variation is good.
-    # Very low = flat. Very high = unstable / messy.
-    if 35 <= pitch_variation <= 70:
-        pitch_score = 85
-    elif 20 <= pitch_variation < 35:
-        pitch_score = 65
-    elif 70 < pitch_variation <= 90:
-        pitch_score = 60
+
+    # 1. Pace score
+    # Ideal conversational authority zone is moderate, not too slow, not rushed.
+    if 115 <= wpm <= 155:
+        pace_score = 85
+    elif 105 <= wpm < 115 or 155 < wpm <= 170:
+        pace_score = 72
+    elif 95 <= wpm < 105 or 170 < wpm <= 180:
+        pace_score = 55
+    elif 85 <= wpm < 95 or 180 < wpm <= 195:
+        pace_score = 38
     else:
-        pitch_score = 40
+        pace_score = 25
 
-    # Energy mean: too low = weak, too high = forced
-    if energy_mean < 35:
-        energy_score = 40
-    elif energy_mean < 42:
-        energy_score = 55
-    elif energy_mean <= 58:
-        energy_score = 80
-    elif energy_mean <= 65:
-        energy_score = 68
+    # 2. Pause control score
+    # Controlled pauses are good; lots of hesitating or no pauses at all are bad.
+    if 0.30 <= avg_pause <= 0.75:
+        pause_control_score = 85
+    elif 0.22 <= avg_pause < 0.30 or 0.75 < avg_pause <= 1.0:
+        pause_control_score = 68
+    elif 0.16 <= avg_pause < 0.22 or 1.0 < avg_pause <= 1.3:
+        pause_control_score = 48
     else:
-        energy_score = 55
+        pause_control_score = 28
 
-    basic_delivery = (pitch_score + energy_score) / 2
-
-    # =========================
-    # 🧠 ADVANCED DELIVERY
-    # =========================
-    # Pause quality
-    if 0.35 <= avg_pause <= 0.9:
-        pause_score = 82
-    elif 0.25 <= avg_pause < 0.35:
-        pause_score = 65
-    elif 0.9 < avg_pause <= 1.2:
-        pause_score = 62
-    elif avg_pause < 0.18:
-        pause_score = 28
-    else:
-        pause_score = 35
-
-    # Silence control
-    if 0.10 <= silence_ratio <= 0.26:
-        silence_score = 84
-    elif 0.07 <= silence_ratio < 0.10:
-        silence_score = 65
-    elif 0.26 < silence_ratio <= 0.32:
-        silence_score = 58
-    elif silence_ratio < 0.07:
-        silence_score = 28
-    else:
-        silence_score = 35
-
-    # Pause frequency / rhythm
-    if 0.18 <= pause_frequency <= 0.38:
-        pause_frequency_score = 82
-    elif 0.38 < pause_frequency <= 0.52:
-        pause_frequency_score = 55
+    # 3. Rhythm score
+    # Too many pauses often signals broken flow / hesitation.
+    if 0.18 <= pause_frequency <= 0.35:
+        rhythm_score = 85
+    elif 0.35 < pause_frequency <= 0.45:
+        rhythm_score = 65
+    elif 0.45 < pause_frequency <= 0.55:
+        rhythm_score = 45
     elif pause_frequency < 0.18:
-        pause_frequency_score = 45
+        rhythm_score = 50
     else:
-        pause_frequency_score = 32
+        rhythm_score = 28
 
-    # Dynamic range / monotone detection
-    if energy_variation < 4:
-        dynamic_score = 22
-    elif energy_variation < 7:
-        dynamic_score = 42
-    elif energy_variation < 11:
-        dynamic_score = 60
-    elif energy_variation <= 22:
-        dynamic_score = 82
+    # 4. Vocal control score
+    # Moderate pitch variation is best. Too flat = dull. Too chaotic = unstable.
+    if 32 <= pitch_variation <= 60:
+        vocal_control_score = 85
+    elif 24 <= pitch_variation < 32 or 60 < pitch_variation <= 72:
+        vocal_control_score = 65
+    elif 18 <= pitch_variation < 24 or 72 < pitch_variation <= 85:
+        vocal_control_score = 45
     else:
-        dynamic_score = 72
+        vocal_control_score = 25
 
-    advanced_delivery = (
-        pause_score +
-        silence_score +
-        pause_frequency_score +
-        dynamic_score
-    ) / 4
+    # 5. Energy control score
+    # Need enough energy to sound engaged, but not forced.
+    energy_base = 0
+    if 45 <= energy_mean <= 60:
+        energy_base = 80
+    elif 40 <= energy_mean < 45 or 60 < energy_mean <= 66:
+        energy_base = 65
+    elif 35 <= energy_mean < 40 or 66 < energy_mean <= 72:
+        energy_base = 48
+    else:
+        energy_base = 30
+
+    # Energy variation helps detect monotone delivery
+    if 10 <= energy_variation <= 22:
+        energy_variation_bonus = 5
+    elif 7 <= energy_variation < 10:
+        energy_variation_bonus = 0
+    elif 4 <= energy_variation < 7:
+        energy_variation_bonus = -12
+    else:
+        energy_variation_bonus = -20
+
+    energy_control_score = clamp(energy_base + energy_variation_bonus, 20, 90)
+
+    # 6. Silence control score
+    # Too much silence = hesitant; too little = rushed.
+    if 0.10 <= silence_ratio <= 0.24:
+        silence_control_score = 85
+    elif 0.24 < silence_ratio <= 0.30 or 0.07 <= silence_ratio < 0.10:
+        silence_control_score = 65
+    elif 0.30 < silence_ratio <= 0.36 or 0.05 <= silence_ratio < 0.07:
+        silence_control_score = 45
+    else:
+        silence_control_score = 25
 
     # =========================
-    # 🔗 COMBINED DELIVERY
+    # 🔗 DELIVERY SCORE
     # =========================
-    delivery_score = (0.42 * basic_delivery) + (0.58 * advanced_delivery)
+    delivery_score = (
+        pace_score +
+        pause_control_score +
+        rhythm_score +
+        vocal_control_score +
+        energy_control_score +
+        silence_control_score
+    ) / 6
 
     # =========================
     # 🔗 BASE SCORE
     # =========================
-    # Delivery now matters slightly MORE than content
-    base_score = (0.45 * cognitive_score) + (0.55 * delivery_score)
+    # Communication authority depends slightly more on delivery than transcript.
+    base_score = (0.42 * content_score) + (0.58 * delivery_score)
 
     # =========================
     # 🔥 PENALTIES
@@ -133,132 +146,118 @@ def compute_authority_score(voice_metrics, cognitive_metrics, delivery_metrics):
 
     # Filler penalty
     if filler_density > 0.10:
-        penalty += 22
+        penalty += 20
     elif filler_density > 0.05:
-        penalty += 14
-    elif filler_density > 0.02:
-        penalty += 7
-
-    # Speaking rate penalty
-    if wpm > 185:
-        penalty += 14
-    elif wpm > 170:
-        penalty += 8
-    elif wpm < 90:
-        penalty += 10
-    elif wpm < 105:
-        penalty += 6
-
-    # Weak content penalties
-    if idea_strength < 45:
         penalty += 12
-    elif idea_strength < 55:
+    elif filler_density > 0.02:
         penalty += 6
 
-    if coherence < 45:
+    # Weak transcript penalties
+    if idea_strength < 45:
         penalty += 10
-    elif coherence < 55:
+    elif idea_strength < 55:
         penalty += 5
 
-    if conciseness < 45:
+    if coherence < 45:
         penalty += 8
+    elif coherence < 55:
+        penalty += 4
 
-    # =========================
-    # ⚠️ VOICE STABILITY PENALTY
-    # =========================
-    stability_penalty = 0
+    if conciseness < 45:
+        penalty += 6
 
-    if pitch_variation > 90:
-        stability_penalty += 12
-    elif pitch_variation > 75:
-        stability_penalty += 6
+    # Delivery-specific penalties
+    if wpm < 90:
+        penalty += 10
+    elif wpm < 100:
+        penalty += 6
+    elif wpm > 185:
+        penalty += 10
+    elif wpm > 170:
+        penalty += 5
 
-    # Chaotic pitch + hesitation is especially bad
-    if pitch_variation > 70 and silence_ratio > 0.25:
-        stability_penalty += 10
+    if pause_frequency > 0.50:
+        penalty += 8
+    elif pause_frequency > 0.42:
+        penalty += 4
 
-    # Very flat pitch is also bad
-    if pitch_variation < 22:
-        stability_penalty += 10
-    elif pitch_variation < 30:
-        stability_penalty += 5
-
-    # =========================
-    # 🚨 HESITATION PENALTY
-    # =========================
-    hesitation_penalty = 0
+    if avg_pause > 1.1:
+        penalty += 8
+    elif avg_pause > 0.9:
+        penalty += 4
 
     if silence_ratio > 0.30:
-        hesitation_penalty += 12
-    elif silence_ratio > 0.26:
-        hesitation_penalty += 6
+        penalty += 8
+    elif silence_ratio < 0.07:
+        penalty += 6
 
-    if avg_pause > 1.2:
-        hesitation_penalty += 10
-    elif avg_pause > 0.9:
-        hesitation_penalty += 5
+    if pitch_variation < 22:
+        penalty += 8
+    elif pitch_variation > 80:
+        penalty += 8
 
-    if pause_frequency > 0.60:
-        hesitation_penalty += 10
-    elif pause_frequency > 0.45:
-        hesitation_penalty += 5
+    if energy_variation < 6:
+        penalty += 10
+    elif energy_variation < 8:
+        penalty += 5
 
-    # Rushing penalties
-    if silence_ratio < 0.07:
-        hesitation_penalty += 10
-    if avg_pause < 0.18:
-        hesitation_penalty += 8
+    # Combined hesitation / instability penalties
+    if pause_frequency > 0.45 and silence_ratio > 0.24:
+        penalty += 8
 
-    # Monotone penalties
-    if energy_variation < 4:
-        hesitation_penalty += 14
-    elif energy_variation < 7:
-        hesitation_penalty += 8
-
-    penalty += stability_penalty
-    penalty += hesitation_penalty
+    if pitch_variation > 72 and silence_ratio > 0.24:
+        penalty += 8
 
     # =========================
     # 🚨 FAILURE OVERRIDE
     # =========================
     if failure:
-        return round(min(base_score, 50), 2)
+        return round(min(base_score, 45), 2)
 
     # =========================
-    # 🎯 FINAL SCORE
+    # 🎯 FINAL SCORE PRE-CAP
     # =========================
     final_score = base_score - penalty
 
     # =========================
-    # 🚨 WEAK DELIVERY CAPS
+    # 🚨 DELIVERY CAPS
     # =========================
+    # This is the key rule: bad delivery cannot be rescued too much by decent words.
+    if delivery_score < 35:
+        final_score = min(final_score, 42)
+    elif delivery_score < 45:
+        final_score = min(final_score, 50)
+    elif delivery_score < 55:
+        final_score = min(final_score, 58)
+    elif delivery_score < 62:
+        final_score = min(final_score, 64)
+
+    # Additional cap for obvious hesitation patterns
     delivery_red_flags = 0
 
-    if pitch_variation < 30 or pitch_variation > 90:
+    if wpm < 95 or wpm > 185:
         delivery_red_flags += 1
-    if energy_variation < 7:
+    if pause_frequency > 0.50:
         delivery_red_flags += 1
-    if silence_ratio < 0.07 or silence_ratio > 0.30:
+    if silence_ratio > 0.30:
         delivery_red_flags += 1
-    if avg_pause < 0.18 or avg_pause > 1.2:
+    if avg_pause > 1.1:
         delivery_red_flags += 1
-    if pause_frequency > 0.60:
+    if pitch_variation < 22 or pitch_variation > 80:
         delivery_red_flags += 1
-    if wpm > 185 or wpm < 90:
+    if energy_variation < 6:
         delivery_red_flags += 1
 
-    if delivery_score < 42:
-        final_score = min(final_score, 48)
-    elif delivery_score < 50:
-        final_score = min(final_score, 55)
-    elif delivery_score < 58:
-        final_score = min(final_score, 62)
+    if delivery_red_flags >= 4:
+        final_score = min(final_score, 46)
     elif delivery_red_flags >= 3:
-        final_score = min(final_score, 55)
+        final_score = min(final_score, 52)
     elif delivery_red_flags >= 2:
-        final_score = min(final_score, 61)
+        final_score = min(final_score, 60)
 
-    # Clamp final score
-    final_score = max(25, min(95, final_score))
+    # =========================
+    # ✅ CLAMP
+    # =========================
+    final_score = clamp(final_score, 25, 95)
 
     return round(final_score, 2)
