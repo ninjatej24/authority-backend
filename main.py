@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from openai import OpenAI
 from dotenv import load_dotenv
 from audio_analysis import extract_voice_metrics
@@ -33,7 +33,6 @@ def convert_to_wav(input_path):
 # =========================
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 app = FastAPI()
 
 
@@ -41,10 +40,17 @@ app = FastAPI()
 # 🚀 MAIN ENDPOINT
 # =========================
 @app.post("/analyze")
-async def analyze_voice(file: UploadFile = File(...)):
-
+async def analyze_voice(
+    file: UploadFile = File(...),
+    context: str = Form("initial"),
+    title: str = Form("Speech Analysis"),
+    prompt: str = Form(""),
+    drill_id: str | None = Form(None),
+    module_slug: str | None = Form(None),
+    skill: str | None = Form(None),
+):
     # Save uploaded file
-    suffix = os.path.splitext(file.filename)[1]
+    suffix = os.path.splitext(file.filename)[1] if file.filename else ".m4a"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await file.read())
@@ -72,7 +78,7 @@ async def analyze_voice(file: UploadFile = File(...)):
     # =========================
     # 🧠 COGNITIVE ANALYSIS
     # =========================
-    cognitive_metrics = analyze_cognition(text)
+    cognitive_metrics = analyze_cognition(text, context=context, prompt_text=prompt)
 
     # =========================
     # 📊 DELIVERY METRICS
@@ -84,7 +90,6 @@ async def analyze_voice(file: UploadFile = File(...)):
 
     filler_words = ["um", "uh", "like", "you know", "sort of", "kind of"]
     transcript_lower = text.lower()
-
     filler_count = sum(transcript_lower.count(word) for word in filler_words)
     filler_density = filler_count / max(word_count, 1)
 
@@ -110,13 +115,21 @@ async def analyze_voice(file: UploadFile = File(...)):
         voice_metrics,
         delivery_metrics,
         cognitive_metrics,
-        authority_score
+        authority_score,
+        context=context,
+        prompt_text=prompt
     )
 
     # =========================
-    # 🧪 DEBUG LOGS (IMPORTANT)
+    # 🧪 DEBUG LOGS
     # =========================
     print("\n===== DEBUG =====")
+    print("Context:", context)
+    print("Title:", title)
+    print("Prompt:", prompt)
+    print("Drill ID:", drill_id)
+    print("Module Slug:", module_slug)
+    print("Skill:", skill)
     print("Transcript:", text)
     print("Voice Metrics:", voice_metrics)
     print("Delivery Metrics:", delivery_metrics)
@@ -128,6 +141,12 @@ async def analyze_voice(file: UploadFile = File(...)):
     # 📤 RESPONSE
     # =========================
     return {
+        "context": context,
+        "title": title,
+        "prompt": prompt,
+        "drill_id": drill_id,
+        "module_slug": module_slug,
+        "skill": skill,
         "transcript": text,
         "voice_metrics": voice_metrics,
         "cognitive_metrics": cognitive_metrics,

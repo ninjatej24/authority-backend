@@ -80,8 +80,10 @@ def _normalize_response(parsed):
     return normalized
 
 
-def analyze_cognition(transcript):
+def analyze_cognition(transcript, context="initial", prompt_text=""):
     transcript = (transcript or "").strip()
+    context = (context or "initial").strip().lower()
+    prompt_text = (prompt_text or "").strip()
 
     if not transcript:
         return {
@@ -92,6 +94,37 @@ def analyze_cognition(transcript):
             "conciseness": {"score": 20, "reason": "No transcript was available to evaluate."},
             "failure": True
         }
+
+    if context == "impromptu":
+        context_instructions = f"""
+This transcript comes from an IMPROMPTU speaking challenge.
+
+The speaker had limited time to think before responding.
+Judge the transcript as an under-pressure response to a live prompt, not as a polished prepared speech.
+
+Prompt:
+{prompt_text}
+
+For IMPROMPTU mode, pay special attention to:
+- whether the speaker actually answers the prompt
+- whether they form a point quickly
+- whether the response holds together under pressure
+- whether they drift, stall, or circle vaguely
+- whether the finish feels complete rather than abandoned
+
+For IMPROMPTU mode:
+- clarity and coherence matter a lot
+- idea strength should reward a clear angle, not just a polished argument
+- persuasion should reflect whether the answer has force and conviction, but do NOT punish too hard for not sounding like a prepared speech
+- conciseness should reflect whether they get to the point instead of wandering
+"""
+    else:
+        context_instructions = f"""
+This transcript comes from a general speaking evaluation.
+
+Prompt:
+{prompt_text}
+"""
 
     prompt = f"""
 You are an elite communication analyst.
@@ -115,6 +148,8 @@ Important:
 - Do not give high scores just because the transcript is grammatically correct.
 - Repetition, vagueness, weak examples, weak logic, and generic wording should lower scores.
 - Only give 80+ if the transcript is unusually clear, sharp, well-structured, and impactful.
+
+{context_instructions}
 
 Evaluate these dimensions:
 

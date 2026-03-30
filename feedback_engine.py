@@ -22,7 +22,28 @@ def _safe_parse(content: str):
         return None
 
 
-def _fallback():
+def _fallback(context: str = "initial"):
+    if context == "impromptu":
+        return {
+            "strengths": [
+                "You were able to produce an answer under pressure without completely losing direction.",
+                "There was at least a visible attempt to organize the response instead of speaking in fragments."
+            ],
+            "weaknesses": [
+                "The response was not structured tightly enough, so the main point did not land early enough.",
+                "Your answer under pressure needs a cleaner finish instead of trailing off or wandering."
+            ],
+            "main_issue": "Lack of fast structure under pressure",
+            "fixes": [
+                "State your answer earlier, then support it with one strong supporting idea instead of exploring too many directions.",
+                "Finish with a final sentence that closes the thought instead of fading out."
+            ],
+            "drills": [
+                "Answer random prompts in 30 seconds using a 3-part structure: point, support, finish.",
+                "Practice giving one-sentence answers first, then expand only once the main point is clear."
+            ]
+        }
+
     return {
         "strengths": [
             "You communicated a clear central idea.",
@@ -44,15 +65,52 @@ def _fallback():
     }
 
 
-def generate_feedback(transcript, voice_metrics, delivery_metrics, cognitive_metrics, authority_score):
-
+def generate_feedback(
+    transcript,
+    voice_metrics,
+    delivery_metrics,
+    cognitive_metrics,
+    authority_score,
+    context="initial",
+    prompt_text="",
+):
     transcript = (transcript or "").strip()
+    context = (context or "initial").strip().lower()
+    prompt_text = (prompt_text or "").strip()
+
+    if context == "impromptu":
+        context_instructions = f"""
+This response comes from IMPROMPTU mode.
+
+The speaker had limited preparation time and was asked to respond to this prompt:
+
+{prompt_text}
+
+For IMPROMPTU mode, your feedback should focus more on:
+- how quickly the speaker formed a clear point
+- whether they stayed on the prompt
+- whether the response had visible structure under pressure
+- whether they drifted, circled, or delayed their main point
+- whether they finished cleanly
+
+For IMPROMPTU mode, avoid treating the response like a polished prepared speech.
+Judge it as a live under-pressure answer.
+"""
+    else:
+        context_instructions = f"""
+This response comes from general speech analysis mode.
+
+Original prompt:
+{prompt_text}
+"""
 
     prompt = f"""
 You are an elite speaking coach.
 
 You MUST base your feedback on REAL DATA from metrics.
 Do NOT guess. Do NOT be generic.
+
+{context_instructions}
 
 ---
 
@@ -87,6 +145,10 @@ CRITICAL RULES:
   ✅ "Your energy_mean is 45 which is below optimal range (~55–70)"
 
 - Be direct. Be sharp. No fluff.
+
+- DO NOT over-focus on pitch_mean by itself.
+- DO NOT claim something from the transcript that is not actually supported.
+- For impromptu mode, prioritize structure under pressure, speed of thought, and staying on topic.
 
 ---
 
@@ -141,13 +203,12 @@ RETURN ONLY JSON:
     parsed = _safe_parse(response.choices[0].message.content)
 
     if not parsed:
-        return _fallback()
+      return _fallback(context)
 
-    # minimal validation
     required_keys = ["strengths", "weaknesses", "main_issue", "fixes", "drills"]
 
     for key in required_keys:
         if key not in parsed:
-            return _fallback()
+            return _fallback(context)
 
     return parsed
