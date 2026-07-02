@@ -588,6 +588,7 @@ class AuthorityReport(BaseModel):
     dimension_reasoning: dict[str, DimensionReasoning] = Field(default_factory=dict)
     trait_reasoning: dict[str, TraitReasoning] = Field(default_factory=dict)
     highest_leverage_reasoning: HighestLeverageReasoning | None = None
+    coaching_engine: CoachingEngine | None = None
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
 
 
@@ -681,6 +682,97 @@ class DiagnosticReasoning(BaseModel):
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
 
 
+# --- Deterministic coaching engine ---
+
+
+class CoachingDrillDefinition(BaseModel):
+    drill_id: str
+    title: str
+    category: str
+    description: str
+    target_behaviours: list[str] = Field(default_factory=list)
+    target_metrics: list[str] = Field(default_factory=list)
+    target_dimensions: list[str] = Field(default_factory=list)
+    expected_authority_impact: float
+    expected_difficulty: Literal["beginner", "intermediate", "advanced"]
+    estimated_duration_min: int
+    trainability_score: float
+    prerequisites: list[str] = Field(default_factory=list)
+    contraindications: list[str] = Field(default_factory=list)
+    evidence_requirements: list[str] = Field(default_factory=list)
+
+
+class CoachingRootCause(BaseModel):
+    root_cause_id: str
+    label: str
+    contributing_signals: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float
+    affected_dimensions: list[str] = Field(default_factory=list)
+
+
+class ExpectedImprovement(BaseModel):
+    drill_id: str
+    authority_score: float = 0.0
+    command: float = 0.0
+    clarity: float = 0.0
+    composure: float = 0.0
+    presence: float = 0.0
+    persuasion: float = 0.0
+    structure: float = 0.0
+    confidence: float = 0.0
+
+
+class InterventionCandidate(BaseModel):
+    drill_id: str
+    title: str
+    score: float
+    severity: float
+    authority_impact: float
+    trainability: float
+    confidence: float
+    scenario_relevance: float
+    required_evidence: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    expected_impact: ExpectedImprovement
+    why_selected: str | None = None
+    why_not_selected: str | None = None
+
+
+class SelectedInterventions(BaseModel):
+    primary_drill: InterventionCandidate | None = None
+    secondary_drill: InterventionCandidate | None = None
+
+
+class CoachingReasoningChain(BaseModel):
+    detected: list[str] = Field(default_factory=list)
+    contributing_factors: list[str] = Field(default_factory=list)
+    root_issue: str | None = None
+    highest_leverage_intervention: str | None = None
+    reason: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class DrillDependency(BaseModel):
+    before: str
+    after: str
+    reason: str
+
+
+class CoachingEngine(BaseModel):
+    drill_library: list[CoachingDrillDefinition] = Field(default_factory=list)
+    drill_library_size: int = 0
+    root_causes: list[CoachingRootCause] = Field(default_factory=list)
+    intervention_candidates: list[InterventionCandidate] = Field(default_factory=list)
+    selected_interventions: SelectedInterventions = Field(default_factory=SelectedInterventions)
+    suppressed_interventions: list[InterventionCandidate] = Field(default_factory=list)
+    reasoning_chain: CoachingReasoningChain = Field(default_factory=CoachingReasoningChain)
+    expected_improvements: dict[str, ExpectedImprovement] = Field(default_factory=dict)
+    dependency_graph: list[DrillDependency] = Field(default_factory=list)
+    future_training_queue: list[InterventionCandidate] = Field(default_factory=list)
+    uncertainty: Uncertainty = Field(default_factory=Uncertainty)
+
+
 
 
 # --- Top-level response ---
@@ -707,6 +799,7 @@ class AuthorityV2Response(BaseModel):
         default_factory=PsychologicalInference
     )
     report: AuthorityReport = Field(default_factory=AuthorityReport)
+    coaching_engine: CoachingEngine = Field(default_factory=CoachingEngine)
     progress: Progress = Field(default_factory=Progress)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)

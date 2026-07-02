@@ -277,3 +277,9 @@ def test_analyze_returns_milestone3_metrics(
     assert report["diagnostic_reasoning"]["dimension_reasoning"]
     assert report["primary_diagnosis"]["supporting_evidence_ids"]
     assert report["highest_leverage_reasoning"]["selection_score"] > 0
+
+    coaching = payload["coaching_engine"]
+    assert coaching["drill_library_size"] >= 20
+    assert coaching["intervention_candidates"]
+    assert coaching["dependency_graph"]
+    assert "root_causes" in coaching

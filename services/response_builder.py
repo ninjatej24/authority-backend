@@ -11,8 +11,10 @@ from openai import OpenAI
 from schemas import (
     ArticulationMetrics,
     AuthorityV2Response,
+    Drill,
     MetricEvidenceBundle,
     Metrics,
+    Recommendations,
     RequestMetadata,
     RhythmMetrics,
     VADMetrics,
@@ -20,9 +22,9 @@ from schemas import (
 from services.acoustic_metrics import AcousticAnalysisResult, extract_acoustic_analysis
 from services.articulation import analyze_articulation
 from services.audio_preprocessing import preprocess_audio
-from services.coaching_engine import build_drills, build_recommendations, generate_feedback
 from services.derived_indices import calculate_derived_indices
 from services.diagnostic_reasoning import build_diagnostic_reasoning
+from services.deterministic_coaching import build_deterministic_coaching
 from services.evidence import (
     EvidenceCollection,
     add_articulation_evidence,
@@ -44,7 +46,7 @@ from services.inference_engine import (
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 from services.moments import build_moments
 from services.psychological_inference import build_psychological_inference
-from services.report_builder import build_report
+from services.report_builder import apply_coaching_to_report, build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
 from services.transcription import transcribe_audio
@@ -131,6 +133,51 @@ def _should_force_empty_vad(duration_ms: int, audio_warnings: list[str]) -> bool
             "very low signal",
         )
     )
+
+
+def _deterministic_recommendations(coaching_engine) -> Recommendations:
+    primary = coaching_engine.selected_interventions.primary_drill
+    if primary:
+        return Recommendations(
+            highest_leverage_issue=primary.drill_id,
+            fastest_improvement_tip=primary.why_selected or "highest_weighted_intervention_score",
+            coaching_summary=coaching_engine.reasoning_chain.reason
+            or "deterministic_intervention_selected_from_evidence",
+        )
+    return Recommendations(
+        highest_leverage_issue="insufficient_evidence",
+        fastest_improvement_tip="Record a usable sample before selecting a drill.",
+        coaching_summary="Coaching was suppressed because evidence was insufficient.",
+    )
+
+
+def _deterministic_drills(coaching_engine) -> list[Drill]:
+    selected = [
+        item
+        for item in (
+            coaching_engine.selected_interventions.primary_drill,
+            coaching_engine.selected_interventions.secondary_drill,
+        )
+        if item is not None
+    ]
+    by_id = {definition.drill_id: definition for definition in coaching_engine.drill_library}
+    drills: list[Drill] = []
+    for candidate in selected:
+        definition = by_id.get(candidate.drill_id)
+        if not definition:
+            continue
+        drills.append(
+            Drill(
+                drill_id=definition.drill_id,
+                title=definition.title,
+                goal=definition.category,
+                instructions=[definition.description],
+                duration_min=definition.estimated_duration_min,
+                difficulty=definition.expected_difficulty,
+                target_metrics=definition.target_metrics,
+            )
+        )
+    return drills
 
 
 def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response:
@@ -401,16 +448,6 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         acoustic=acoustic,
     )
 
-    feedback = generate_feedback(
-        text,
-        voice_metrics,
-        delivery_metrics,
-        cognitive,
-        scoring.legacy_authority_score,
-        context=request.context,
-        prompt_text=request.prompt,
-    )
-
     perception = build_perception_profile(
         scoring.scores.authority_score,
         scoring.dimension_map,
@@ -506,9 +543,21 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         duration_ms=duration_ms,
         scenario=_map_scenario(request.context),
     )
+    coaching_engine = build_deterministic_coaching(
+        metrics=metrics_payload,
+        scores=scores,
+        psychological_inference=psychological_inference,
+        diagnostic_reasoning=diagnostic_reasoning,
+        report=report,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario=_map_scenario(request.context),
+    )
+    report = apply_coaching_to_report(report, coaching_engine)
 
-    recommendations = build_recommendations(feedback, delivery_metrics)
-    drills = build_drills(feedback, delivery_metrics, scoring.dimension_map)
+    recommendations = _deterministic_recommendations(coaching_engine)
+    drills = _deterministic_drills(coaching_engine)
 
     metric_evidence_payload = serialize_evidence_collection(evidence_collection)
 
@@ -533,5 +582,6 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         drills=drills,
         psychological_inference=psychological_inference,
         report=report,
+        coaching_engine=coaching_engine,
         uncertainty=uncertainty,
     )

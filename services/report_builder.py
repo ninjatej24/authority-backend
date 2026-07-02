@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from schemas import (
     AudioQuality,
     AuthorityReport,
+    CoachingEngine,
     DiagnosticDiagnosis,
     DiagnosticReasoning,
     EvidenceItem,
@@ -639,6 +640,49 @@ def _appendix(
         audio_quality_warnings=audio_quality.quality_warnings,
         score_components=scores.score_components.model_dump(),
         evidence_ids=evidence_ids,
+    )
+
+
+def apply_coaching_to_report(report: AuthorityReport, coaching: CoachingEngine) -> AuthorityReport:
+    """Attach deterministic coaching output and use it for report drill selection."""
+    primary = coaching.selected_interventions.primary_drill
+    if not primary:
+        return report.model_copy(update={"coaching_engine": coaching})
+
+    drill = next(
+        (item for item in coaching.drill_library if item.drill_id == primary.drill_id),
+        None,
+    )
+    fix = report.highest_leverage_fix
+    if fix:
+        fix = fix.model_copy(
+            update={
+                "first_drill_id": primary.drill_id,
+                "selection_score": primary.score,
+                "evidence_ids": primary.supporting_evidence_ids,
+                "target_dimensions": drill.target_dimensions if drill else fix.target_dimensions,
+            }
+        )
+
+    training = report.training_prescription
+    if training and drill:
+        training = training.model_copy(
+            update={
+                "drill_id": drill.drill_id,
+                "title": drill.title,
+                "why_chosen": primary.why_selected,
+                "target_metrics": drill.target_metrics,
+                "success_signal": "expected_improvement_model_attached",
+                "evidence_ids": primary.supporting_evidence_ids,
+            }
+        )
+
+    return report.model_copy(
+        update={
+            "highest_leverage_fix": fix,
+            "training_prescription": training,
+            "coaching_engine": coaching,
+        }
     )
 
 
