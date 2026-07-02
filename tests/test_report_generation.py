@@ -1,0 +1,147 @@
+"""Milestone 7 premium report generation tests."""
+
+from __future__ import annotations
+
+from schemas import AudioQuality, Uncertainty
+from services.deterministic_coaching import build_deterministic_coaching
+from services.report_builder import build_report
+from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
+from tests.test_psychological_inference import _infer, _metrics, _scores
+from tests.test_report_builder import _evidence, _moments
+
+
+def _generated_report(**kwargs):
+    scores = kwargs.pop("scores", _softened_expert_scores())
+    metrics = kwargs.pop("metrics", _metrics())
+    audio_quality = kwargs.pop("audio_quality", AudioQuality(usable=True, background_noise_level="low"))
+    uncertainty = kwargs.pop("uncertainty", Uncertainty(overall_confidence_label="medium_high", reasons=[]))
+    duration_ms = kwargs.pop("duration_ms", 60000)
+    scenario = kwargs.pop("scenario", "benchmark")
+    evidence = kwargs.pop("evidence", _evidence())
+    moments = kwargs.pop("moments", _moments())
+    inference = kwargs.pop("inference", _infer(metrics, audio_quality=audio_quality, duration_ms=duration_ms))
+    diagnostic = kwargs.pop(
+        "diagnostic_reasoning",
+        _diagnostic(
+            scores=scores,
+            metrics=metrics,
+            audio_quality=audio_quality,
+            uncertainty=uncertainty,
+            duration_ms=duration_ms,
+            scenario=scenario,
+            inference=inference,
+            evidence=evidence,
+            moments=moments,
+        ),
+    )
+    coaching = build_deterministic_coaching(
+        metrics=metrics,
+        scores=scores,
+        psychological_inference=inference,
+        diagnostic_reasoning=diagnostic,
+        report=None,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario=scenario,
+    )
+    return build_report(
+        scores=scores,
+        metrics=metrics,
+        psychological_inference=inference,
+        diagnostic_reasoning=diagnostic,
+        coaching_engine=coaching,
+        evidence=evidence,
+        moments=moments,
+        uncertainty=uncertainty,
+        audio_quality=audio_quality,
+        duration_ms=duration_ms,
+        scenario=scenario,
+    )
+
+
+def test_premium_report_contains_all_required_sections_and_validation():
+    report = _generated_report()
+
+    assert report.mirror.headline
+    assert report.mirror.one_line_identity_read
+    assert report.diagnosis.primary_strength_dimension
+    assert report.perception_map.first_impression.evidence_ids
+    assert report.evidence_chain
+    assert report.timeline
+    assert set(report.dimension_reports) == {"command", "clarity", "composure", "presence", "persuasion", "structure"}
+    assert report.hidden_cost.consequence
+    assert report.highest_leverage_fix.first_drill_id
+    assert report.training_prescription.drill_id
+    assert report.retest_plan.same_prompt_recommended is True
+    assert report.technical_appendix.metrics
+    assert report.share_card.share_safety == "public_safe"
+    assert report.validation.valid is True
+    assert report.validation.orphan_links == []
+
+
+def test_evidence_and_timeline_references_are_valid_and_not_invented():
+    report = _generated_report()
+    evidence_ids = {item.evidence_id for item in report.evidence_chain}
+    moment_ids = {item.moment_id for item in report.timeline}
+
+    assert report.diagnosis.evidence_ids
+    assert set(report.diagnosis.evidence_ids).issubset(evidence_ids)
+    for item in report.timeline:
+        assert item.moment_id in moment_ids
+        assert set(item.evidence_ids).issubset(evidence_ids)
+        assert item.listener_interpretation
+        assert 0.0 <= item.confidence <= 1.0
+
+
+def test_dimension_reports_are_generated_from_existing_reasoning():
+    report = _generated_report()
+
+    for dimension, dimension_report in report.dimension_reports.items():
+        assert dimension_report.score == getattr(_softened_expert_scores().dimension_scores, dimension)
+        assert dimension_report.meaning
+        assert dimension_report.listener_consequence
+        assert dimension_report.one_improvement_cue
+        assert dimension_report.linked_evidence
+
+
+def test_authority_type_is_deterministic_from_dimension_profile():
+    executive_scores = _scores().model_copy(
+        update={
+            "authority_score": 91,
+            "dimension_scores": _scores().dimension_scores.model_copy(
+                update={
+                    "command": 86,
+                    "clarity": 84,
+                    "composure": 85,
+                    "presence": 83,
+                    "persuasion": 78,
+                    "structure": 80,
+                }
+            ),
+        }
+    )
+    first = _generated_report(scores=executive_scores).authority_type.model_dump()
+    second = _generated_report(scores=executive_scores).authority_type.model_dump()
+
+    assert first == second
+    assert first["label"] == "Executive Presence"
+
+
+def test_report_does_not_invent_scores_or_expose_private_share_findings():
+    scores = _softened_expert_scores()
+    report = _generated_report(scores=scores)
+
+    assert report.share_card.authority_score == scores.authority_score
+    assert report.share_card.hidden_private_findings == []
+    public_text = " ".join(
+        str(value)
+        for value in (
+            report.share_card.authority_type,
+            report.share_card.top_strength,
+            report.share_card.growth_area,
+            report.share_card.one_line_identity_read,
+        )
+    ).lower()
+    assert "approval seeking" not in public_text
+    assert "nervous" not in public_text

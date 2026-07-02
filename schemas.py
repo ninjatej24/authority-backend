@@ -467,10 +467,12 @@ class Safety(BaseModel):
 class ReportMirror(BaseModel):
     headline: str | None = None
     identity_read: str | None = None
+    one_line_identity_read: str | None = None
     core_tension: str | None = None
     emotional_tone: str | None = None
     authority_type: str | None = None
     confidence_label: Literal["low", "medium", "medium_high", "high"] = "low"
+    confidence_level: Literal["low", "medium", "medium_high", "high"] = "low"
     evidence_ids: list[str] = Field(default_factory=list)
 
 
@@ -481,6 +483,10 @@ class ReportDiagnosis(BaseModel):
     social_consequence: str | None = None
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     severity: Literal["low", "medium", "high"] | None = None
+    primary_strength_dimension: str | None = None
+    primary_limiting_dimension: str | None = None
+    core_pattern: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
 
 
 class ReportPerceptionRead(BaseModel):
@@ -567,12 +573,60 @@ class ReportTechnicalAppendix(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class ReportEvidenceCard(BaseModel):
+    evidence_id: str
+    signal: str
+    what_happened: str
+    why_it_matters: str
+    listener_interpretation: str
+    related_dimension: str
+    confidence: float
+    timestamp: list[int] | None = None
+
+
+class ReportTimelineItem(BaseModel):
+    moment_id: str
+    type: str
+    headline: str
+    summary: str
+    listener_interpretation: str
+    dimension_impact: dict[str, float] = Field(default_factory=dict)
+    confidence: float
+    start_ms: int
+    end_ms: int
+    evidence_ids: list[str] = Field(default_factory=list)
+    severity: Literal["highlight", "low", "medium", "high"]
+    preview_visible_free: bool = False
+
+
+class ReportDimensionReport(BaseModel):
+    dimension: str
+    score: int
+    label: str
+    meaning: str
+    why: list[str] = Field(default_factory=list)
+    listener_consequence: str
+    one_improvement_cue: str
+    linked_evidence: list[str] = Field(default_factory=list)
+    confidence: float
+
+
+class ReportValidation(BaseModel):
+    valid: bool = True
+    evidence_ids_checked: list[str] = Field(default_factory=list)
+    moment_ids_checked: list[str] = Field(default_factory=list)
+    drill_ids_checked: list[str] = Field(default_factory=list)
+    orphan_links: list[str] = Field(default_factory=list)
+    duplicate_sections: list[str] = Field(default_factory=list)
+
+
 class AuthorityReport(BaseModel):
     mirror: ReportMirror | None = None
     diagnosis: ReportDiagnosis | None = None
     perception_map: ReportPerceptionMap | None = None
-    evidence_chain: list[PsychologicalEvidenceSignal] = Field(default_factory=list)
-    timeline: list[Moment] = Field(default_factory=list)
+    evidence_chain: list[ReportEvidenceCard] = Field(default_factory=list)
+    timeline: list[ReportTimelineItem] = Field(default_factory=list)
+    dimension_reports: dict[str, ReportDimensionReport] = Field(default_factory=dict)
     hidden_cost: ReportHiddenCost | None = None
     highest_leverage_fix: ReportHighestLeverageFix | None = None
     training_prescription: ReportTrainingPrescription | None = None
@@ -589,6 +643,7 @@ class AuthorityReport(BaseModel):
     trait_reasoning: dict[str, TraitReasoning] = Field(default_factory=dict)
     highest_leverage_reasoning: HighestLeverageReasoning | None = None
     coaching_engine: CoachingEngine | None = None
+    validation: ReportValidation = Field(default_factory=ReportValidation)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
 
 

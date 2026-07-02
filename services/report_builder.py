@@ -31,6 +31,7 @@ from schemas import (
     Scores,
     Uncertainty,
 )
+from services.report_generation import build_generated_report
 
 
 DIMENSION_LABELS = {
@@ -698,8 +699,23 @@ def build_report(
     audio_quality: AudioQuality,
     duration_ms: int,
     scenario: str,
+    coaching_engine: CoachingEngine | None = None,
 ) -> AuthorityReport:
     """Assemble the deterministic report object from existing backend facts."""
+    return build_generated_report(
+        scores=scores,
+        metrics=metrics,
+        psychological_inference=psychological_inference,
+        diagnostic_reasoning=diagnostic_reasoning,
+        coaching_engine=coaching_engine,
+        evidence=evidence,
+        moments=moments,
+        uncertainty=uncertainty,
+        audio_quality=audio_quality,
+        duration_ms=duration_ms,
+        scenario=scenario,
+    )
+
     report_confidence = min(
         max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0),
         0.95,

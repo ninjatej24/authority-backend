@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from schemas import AudioQuality, Uncertainty
 from services.deterministic_coaching import build_deterministic_coaching
+from services.response_builder import _deterministic_drills, _deterministic_recommendations
 from services.report_builder import apply_coaching_to_report, build_report
 from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
 from tests.test_psychological_inference import _infer, _metrics, _scores
@@ -202,3 +203,50 @@ def test_report_uses_deterministic_coaching_engine_for_drill_selection():
     assert updated.coaching_engine == coaching
     assert updated.training_prescription.drill_id == coaching.selected_interventions.primary_drill.drill_id
     assert updated.highest_leverage_fix.first_drill_id == coaching.selected_interventions.primary_drill.drill_id
+
+
+def test_legacy_recommendations_are_human_safe_and_keep_engine_reasoning():
+    coaching = _coaching(
+        metrics=_metrics(
+            raw={"terminal_rising_ratio": 0.65},
+            linguistic={"closing_strength_score": 0.25, "hedges_per_100_words": 4.0},
+        )
+    )
+    recommendations = _deterministic_recommendations(coaching)
+
+    unsafe = " ".join(
+        [
+            recommendations.highest_leverage_issue,
+            recommendations.fastest_improvement_tip,
+            recommendations.coaching_summary,
+        ]
+    )
+    assert "_v1" not in unsafe
+    assert "highest_weighted_intervention_score" not in unsafe
+    assert recommendations.highest_leverage_issue != coaching.selected_interventions.primary_drill.drill_id
+    assert recommendations.fastest_improvement_tip.endswith(".")
+    assert coaching.selected_interventions.primary_drill.drill_id.endswith("_v1")
+    assert coaching.selected_interventions.primary_drill.score > 0
+
+
+def test_legacy_drills_have_safe_titles_instructions_and_metrics():
+    coaching = _coaching(
+        metrics=_metrics(
+            raw={"terminal_rising_ratio": 0.65},
+            linguistic={"closing_strength_score": 0.25, "hedges_per_100_words": 4.0},
+        )
+    )
+    drills = _deterministic_drills(coaching)
+
+    assert drills
+    for drill in drills:
+        visible = " ".join(
+            [drill.drill_id, drill.title, drill.goal, *drill.instructions, *drill.target_metrics]
+        )
+        assert "_v1" not in visible
+        assert "highest_weighted" not in visible
+        assert "approval seeking" not in visible.lower()
+        assert "nervous" not in visible.lower()
+        assert drill.title
+        assert drill.instructions
+        assert drill.duration_min > 0

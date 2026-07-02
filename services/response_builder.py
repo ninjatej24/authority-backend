@@ -46,7 +46,7 @@ from services.inference_engine import (
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 from services.moments import build_moments
 from services.psychological_inference import build_psychological_inference
-from services.report_builder import apply_coaching_to_report, build_report
+from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
 from services.transcription import transcribe_audio
@@ -135,17 +135,127 @@ def _should_force_empty_vad(duration_ms: int, audio_warnings: list[str]) -> bool
     )
 
 
+DRILL_DISPLAY_LABELS = {
+    "pause_ownership_v1": "Pause ownership",
+    "drop_the_landing_v1": "Declarative finality",
+    "filler_cut_v1": "Filler reduction",
+    "pace_anchor_v1": "Pace regulation",
+    "emphasis_ladder_v1": "Dynamic emphasis",
+    "projection_baseline_v1": "Projection",
+    "command_claim_v1": "Command claim",
+    "presence_contrast_v1": "Presence contrast",
+    "pressure_reset_v1": "Composure reset",
+    "answer_first_v1": "Opening strength",
+    "clean_close_v1": "Closing strength",
+    "point_proof_close_v1": "Structure compression",
+    "rambling_gate_v1": "Rambling reduction",
+    "one_point_one_proof_v1": "Specificity",
+    "certainty_replace_v1": "Certainty language",
+    "hedge_trim_v1": "Hedging reduction",
+    "rhythm_grid_v1": "Rhythm consistency",
+    "articulation_edges_v1": "Articulation clarity",
+    "breath_mark_v1": "Breath control",
+    "pressure_claim_v1": "Confidence under pressure",
+}
+
+DRILL_GOAL_LABELS = {
+    "pause_ownership": "Use intentional pauses so key claims have room to land.",
+    "declarative_finality": "Make important sentence endings sound complete and decisive.",
+    "filler_reduction": "Replace filler bursts with controlled silence.",
+    "pace_regulation": "Keep pace steady when the point becomes important.",
+    "dynamic_emphasis": "Give important words more contrast without forcing volume.",
+    "projection": "Build stable vocal energy before adding emphasis.",
+    "command": "State claims with clearer ownership.",
+    "presence": "Make the message easier to keep listening to.",
+    "composure": "Reset pace and breath before the next claim.",
+    "opening_strength": "Put the main answer in the first sentence.",
+    "closing_strength": "End with a clean takeaway.",
+    "structure_compression": "Compress the answer into point, proof, and close.",
+    "rambling_reduction": "Stop once the answer has advanced the point.",
+    "specificity": "Add one concrete proof point to the claim.",
+    "certainty_language": "Replace soft qualifiers with clear commitments.",
+    "hedging_reduction": "Keep nuance while removing unnecessary hedges.",
+    "rhythm_consistency": "Speak in even phrase groups without rushing the middle.",
+    "articulation": "Clarify word edges without over-performing.",
+    "breath_control": "Use breath before high-value phrases.",
+    "confidence_under_pressure": "Deliver the key claim after a pause without speeding up.",
+}
+
+METRIC_DISPLAY_LABELS = {
+    "raw_acoustic.avg_pause_ms": "average pause length",
+    "raw_acoustic.mid_phrase_pause_rate": "mid-phrase pause rate",
+    "raw_acoustic.terminal_rising_ratio": "rising ending rate",
+    "raw_acoustic.terminal_falling_ratio": "falling ending rate",
+    "linguistic.closing_strength_score": "closing strength",
+    "linguistic.filler_words_per_min": "filler rate",
+    "derived.hesitation_cluster_score": "hesitation clustering",
+    "raw_acoustic.words_per_minute": "speaking pace",
+    "rhythm.rhythm_consistency": "rhythm consistency",
+    "rhythm.speed_up_segments": "pace acceleration",
+    "derived.dynamic_emphasis_score": "dynamic emphasis",
+    "raw_acoustic.loudness_variation_db": "energy variation",
+    "raw_acoustic.f0_range_semitones": "pitch variation",
+    "derived.projection_index": "projection consistency",
+    "linguistic.certainty_markers_per_100_words": "certainty language",
+    "linguistic.opening_strength_score": "opening strength",
+    "linguistic.structure_score": "answer structure",
+    "linguistic.rambling_score": "rambling control",
+    "linguistic.repetition_rate": "repetition rate",
+    "linguistic.specificity_score": "specificity",
+    "linguistic.concreteness_score": "concreteness",
+    "linguistic.hedges_per_100_words": "hedging rate",
+    "linguistic.self_doubt_markers": "self-correction markers",
+    "articulation.clarity_proxy": "articulation clarity",
+    "articulation.articulation_stability": "articulation stability",
+    "derived.composure_index": "composure consistency",
+    "derived.vocal_command_index": "command consistency",
+}
+
+
+def _display_drill_label(drill_id: str | None) -> str:
+    if not drill_id:
+        return "Practice focus"
+    return DRILL_DISPLAY_LABELS.get(
+        drill_id,
+        drill_id.replace("_v1", "").replace("_", " ").capitalize(),
+    )
+
+
+def _display_goal(category: str) -> str:
+    return DRILL_GOAL_LABELS.get(category, category.replace("_", " ").capitalize())
+
+
+def _display_metrics(metrics: list[str]) -> list[str]:
+    return [METRIC_DISPLAY_LABELS.get(metric, metric.replace("_", " ")) for metric in metrics]
+
+
+def _legacy_tip(label: str, definition) -> str:
+    return f"Start with {label.lower()}: {definition.description}"
+
+
+def _legacy_summary(label: str, coaching_engine) -> str:
+    root = coaching_engine.reasoning_chain.root_issue
+    if root:
+        root_label = root.replace("_", " ")
+        return f"{label} was selected because the evidence points to {root_label} as the most useful practice focus."
+    return f"{label} was selected because it has the strongest supported practice value for this recording."
+
+
 def _deterministic_recommendations(coaching_engine) -> Recommendations:
     primary = coaching_engine.selected_interventions.primary_drill
+    by_id = {definition.drill_id: definition for definition in coaching_engine.drill_library}
     if primary:
+        definition = by_id.get(primary.drill_id)
+        label = _display_drill_label(primary.drill_id)
         return Recommendations(
-            highest_leverage_issue=primary.drill_id,
-            fastest_improvement_tip=primary.why_selected or "highest_weighted_intervention_score",
-            coaching_summary=coaching_engine.reasoning_chain.reason
-            or "deterministic_intervention_selected_from_evidence",
+            highest_leverage_issue=label,
+            fastest_improvement_tip=_legacy_tip(label, definition)
+            if definition
+            else f"Start with {label.lower()} for this recording.",
+            coaching_summary=_legacy_summary(label, coaching_engine),
         )
     return Recommendations(
-        highest_leverage_issue="insufficient_evidence",
+        highest_leverage_issue="Record a clearer sample",
         fastest_improvement_tip="Record a usable sample before selecting a drill.",
         coaching_summary="Coaching was suppressed because evidence was insufficient.",
     )
@@ -166,15 +276,16 @@ def _deterministic_drills(coaching_engine) -> list[Drill]:
         definition = by_id.get(candidate.drill_id)
         if not definition:
             continue
+        label = _display_drill_label(definition.drill_id)
         drills.append(
             Drill(
-                drill_id=definition.drill_id,
-                title=definition.title,
-                goal=definition.category,
+                drill_id=label,
+                title=label,
+                goal=_display_goal(definition.category),
                 instructions=[definition.description],
                 duration_min=definition.estimated_duration_min,
                 difficulty=definition.expected_difficulty,
-                target_metrics=definition.target_metrics,
+                target_metrics=_display_metrics(definition.target_metrics),
             )
         )
     return drills
@@ -531,11 +642,23 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         duration_ms=duration_ms,
         scenario=_map_scenario(request.context),
     )
+    coaching_engine = build_deterministic_coaching(
+        metrics=metrics_payload,
+        scores=scores,
+        psychological_inference=psychological_inference,
+        diagnostic_reasoning=diagnostic_reasoning,
+        report=None,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario=_map_scenario(request.context),
+    )
     report = build_report(
         scores=scores,
         metrics=metrics_payload,
         psychological_inference=psychological_inference,
         diagnostic_reasoning=diagnostic_reasoning,
+        coaching_engine=coaching_engine,
         evidence=evidence,
         moments=moments,
         uncertainty=uncertainty,
@@ -543,18 +666,6 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         duration_ms=duration_ms,
         scenario=_map_scenario(request.context),
     )
-    coaching_engine = build_deterministic_coaching(
-        metrics=metrics_payload,
-        scores=scores,
-        psychological_inference=psychological_inference,
-        diagnostic_reasoning=diagnostic_reasoning,
-        report=report,
-        audio_quality=audio_quality,
-        uncertainty=uncertainty,
-        duration_ms=duration_ms,
-        scenario=_map_scenario(request.context),
-    )
-    report = apply_coaching_to_report(report, coaching_engine)
 
     recommendations = _deterministic_recommendations(coaching_engine)
     drills = _deterministic_drills(coaching_engine)
