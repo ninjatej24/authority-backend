@@ -278,6 +278,13 @@ def _filter_short_segments(
     ]
 
 
+def _merge_and_filter_speech_segments(
+    segments: list[tuple[int, int, bool]],
+) -> list[tuple[int, int, bool]]:
+    merged_speech = _merge_adjacent_segments(segments)
+    return _filter_short_segments(merged_speech, MIN_SPEECH_DURATION_MS)
+
+
 def _build_complete_timeline(
     speech_segments: list[tuple[int, int, bool]],
     total_duration_ms: int,
@@ -430,23 +437,29 @@ def run_vad(
     if total_duration_ms <= 0:
         return _empty_vad_result(total_duration_ms, backend="none")
 
+    speech_segments: list[tuple[int, int, bool]]
+    backend: str
+
     if WEBRTC_VAD_AVAILABLE:
         try:
             vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
             raw_speech_segments = _collect_segments_webrtc(vad, pcm, sample_rate)
             backend = "webrtc"
-            if not raw_speech_segments:
-                raw_speech_segments = _collect_segments_energy(pcm, sample_rate)
-                backend = "energy_fallback" if raw_speech_segments else "webrtc"
+            speech_segments = _merge_and_filter_speech_segments(raw_speech_segments)
+            if not speech_segments:
+                energy_segments = _collect_segments_energy(pcm, sample_rate)
+                speech_segments = _merge_and_filter_speech_segments(energy_segments)
+                if speech_segments:
+                    backend = "energy_fallback"
         except Exception:
-            raw_speech_segments = _collect_segments_energy(pcm, sample_rate)
+            energy_segments = _collect_segments_energy(pcm, sample_rate)
+            speech_segments = _merge_and_filter_speech_segments(energy_segments)
             backend = "energy_fallback"
     else:
-        raw_speech_segments = _collect_segments_energy(pcm, sample_rate)
+        energy_segments = _collect_segments_energy(pcm, sample_rate)
+        speech_segments = _merge_and_filter_speech_segments(energy_segments)
         backend = "energy_fallback"
 
-    merged_speech = _merge_adjacent_segments(raw_speech_segments)
-    speech_segments = _filter_short_segments(merged_speech, MIN_SPEECH_DURATION_MS)
     if not speech_segments:
         return _empty_vad_result(total_duration_ms, backend="empty_fallback")
 
