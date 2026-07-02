@@ -20,6 +20,7 @@ from schemas import (
     SelectedInterventions,
     Uncertainty,
 )
+from services.scenario_profiles import calculate_dimension_relevance, get_scenario_profile
 
 
 DIMENSIONS = ("command", "clarity", "composure", "presence", "persuasion", "structure")
@@ -276,11 +277,22 @@ def _candidate_evidence(
 
 
 def _scenario_relevance(drill: CoachingDrillDefinition, scenario: str) -> float:
-    if scenario == "benchmark":
+    profile = get_scenario_profile(scenario)
+    if profile.scenario_id == "benchmark":
         return 1.0
-    if scenario == "impromptu" and drill.category in {"pace_regulation", "pause_ownership", "composure", "structure_compression"}:
-        return 1.05
-    return 1.0
+    relevance = 1.0
+    if drill.category in profile.coaching_priorities:
+        relevance += 0.12
+    if set(drill.target_dimensions).intersection(profile.primary_dimensions):
+        relevance += 0.08
+    if set(drill.target_dimensions).intersection(profile.least_important_dimensions):
+        relevance -= 0.06
+    dimension_lift = max(
+        (calculate_dimension_relevance(dimension, profile.scenario_id) for dimension in drill.target_dimensions),
+        default=1.0,
+    )
+    relevance += min(0.08, max(-0.05, (dimension_lift - 1.0) * 0.12))
+    return round(_clamp(relevance, 0.85, 1.25), 2)
 
 
 def _expected_improvement(

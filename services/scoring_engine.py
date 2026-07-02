@@ -16,9 +16,18 @@ from schemas import (
     ScoreComponents,
     ScoreExplanation,
     ScorePenalties,
+    ScenarioAdjustment,
     Scores,
 )
 from services.acoustic_metrics import AcousticAnalysisResult
+from services.scenario_profiles import (
+    WEIGHT_VERSION,
+    apply_scenario_weights,
+    calculate_bonus_scaling,
+    calculate_penalty_scaling,
+    get_scenario_profile,
+    major_weight_changes,
+)
 
 
 DIMENSION_WEIGHTS = {
@@ -421,9 +430,11 @@ def _confidence(
     duration_ms: int | None,
     acoustic: AcousticAnalysisResult | None,
     audio_quality_penalty: float,
+    scenario: str | None,
 ) -> tuple[float, str, list[str], float]:
     confidence = 0.84
     reasons: list[str] = []
+    profile = get_scenario_profile(scenario)
     if failure:
         confidence -= 0.25
         reasons.append("Transcript scoring was unavailable")
@@ -455,6 +466,9 @@ def _confidence(
     if acoustic and acoustic.derived.monotony_index is None:
         confidence -= 0.05
         reasons.append("Some derived acoustic metrics were unavailable")
+    confidence += profile.confidence_modifiers.get("confidence_delta", 0.0)
+    if profile.scenario_id != "benchmark":
+        reasons.append(f"Scenario weighting applied for {profile.scenario_id}")
 
     confidence = round(_clamp(confidence, 0.25, 0.95), 2)
     label = "high" if confidence >= 0.8 else "medium_high" if confidence >= 0.65 else "medium" if confidence >= 0.45 else "low"
@@ -502,6 +516,7 @@ def compute_authority_score(
     audio_quality_usable: bool = True,
     asr_confidence: float | None = None,
     duration_ms: int | None = None,
+    scenario: str | None = "benchmark",
 ) -> ScoringResult:
     """Compute deterministic Authority Score v2 with calibration and explainability."""
     (
@@ -515,7 +530,9 @@ def compute_authority_score(
         fairness,
     ) = compute_dimension_scores(voice_metrics, cognitive_metrics, delivery_metrics, linguistic, acoustic)
 
-    weighted_base = round(sum(getattr(dimensions, key) * weight for key, weight in DIMENSION_WEIGHTS.items()), 2)
+    profile = get_scenario_profile(scenario)
+    dimension_weights = apply_scenario_weights(DIMENSION_WEIGHTS, profile.scenario_id)
+    weighted_base = round(sum(getattr(dimensions, key) * weight for key, weight in dimension_weights.items()), 2)
     confidence, confidence_label, confidence_reasons, low_confidence_penalty = _confidence(
         failure=bool(cognitive_metrics.get("failure", False)),
         audio_quality_usable=audio_quality_usable,
@@ -523,6 +540,7 @@ def compute_authority_score(
         duration_ms=duration_ms,
         acoustic=acoustic,
         audio_quality_penalty=audio_quality_penalty,
+        scenario=profile.scenario_id,
     )
 
     speech_seconds = acoustic.speaking_seconds if acoustic else _metric(voice_metrics, "duration_seconds")
@@ -533,26 +551,34 @@ def compute_authority_score(
         short_speech_penalty = 4.0
 
     bonuses = ScoreBonuses(
-        opening_strength=adjustments.get("opening_strength", 0.0),
-        ending_strength=adjustments.get("ending_strength", 0.0),
-        consistency_bonus=adjustments.get("consistency_bonus", 0.0),
+        opening_strength=round(adjustments.get("opening_strength", 0.0) * calculate_bonus_scaling("opening_strength", profile.scenario_id), 2),
+        ending_strength=round(adjustments.get("ending_strength", 0.0) * calculate_bonus_scaling("ending_strength", profile.scenario_id), 2),
+        consistency_bonus=round(adjustments.get("consistency_bonus", 0.0) * calculate_bonus_scaling("consistency_bonus", profile.scenario_id), 2),
     )
     penalties = ScorePenalties(
-        filler_penalty=adjustments.get("filler_penalty", 0.0),
-        rambling_penalty=adjustments.get("rambling_penalty", 0.0),
-        monotony_penalty=adjustments.get("monotony_penalty", 0.0),
-        rising_ending_penalty=adjustments.get("rising_ending_penalty", 0.0),
-        audio_quality_penalty=round(audio_quality_penalty, 2),
-        short_speech_penalty=short_speech_penalty,
-        low_confidence_penalty=low_confidence_penalty,
-        mid_recording_collapse_penalty=adjustments.get("mid_recording_collapse_penalty", 0.0),
+        filler_penalty=round(adjustments.get("filler_penalty", 0.0) * calculate_penalty_scaling("filler_penalty", profile.scenario_id), 2),
+        rambling_penalty=round(adjustments.get("rambling_penalty", 0.0) * calculate_penalty_scaling("rambling_penalty", profile.scenario_id), 2),
+        monotony_penalty=round(adjustments.get("monotony_penalty", 0.0) * calculate_penalty_scaling("monotony_penalty", profile.scenario_id), 2),
+        rising_ending_penalty=round(adjustments.get("rising_ending_penalty", 0.0) * calculate_penalty_scaling("rising_ending_penalty", profile.scenario_id), 2),
+        audio_quality_penalty=round(audio_quality_penalty * calculate_penalty_scaling("audio_quality_penalty", profile.scenario_id), 2),
+        short_speech_penalty=round(short_speech_penalty * calculate_penalty_scaling("short_speech_penalty", profile.scenario_id), 2),
+        low_confidence_penalty=round(low_confidence_penalty * calculate_penalty_scaling("low_confidence_penalty", profile.scenario_id), 2),
+        mid_recording_collapse_penalty=round(adjustments.get("mid_recording_collapse_penalty", 0.0) * calculate_penalty_scaling("mid_recording_collapse_penalty", profile.scenario_id), 2),
     )
-    if short_speech_penalty:
-        penalty_items.append(ScoreComponentItem(id="short_speech_penalty", label="Short Speech Penalty", value=short_speech_penalty, reason="Short usable speech cannot support a high-confidence score."))
-    if low_confidence_penalty:
-        penalty_items.append(ScoreComponentItem(id="low_confidence_penalty", label="Low Confidence Penalty", value=low_confidence_penalty, reason="Low scoring confidence reduces precision and score inflation."))
-    if audio_quality_penalty:
-        penalty_items.append(ScoreComponentItem(id="audio_quality_penalty", label="Audio Quality Penalty", value=round(audio_quality_penalty, 2), reason="Poor signal quality limits reliable scoring."))
+    penalty_items = [
+        item.model_copy(update={"value": round(item.value * calculate_penalty_scaling(item.id, profile.scenario_id), 2)})
+        for item in penalty_items
+    ]
+    bonus_items = [
+        item.model_copy(update={"value": round(item.value * calculate_bonus_scaling(item.id, profile.scenario_id), 2)})
+        for item in bonus_items
+    ]
+    if penalties.short_speech_penalty:
+        penalty_items.append(ScoreComponentItem(id="short_speech_penalty", label="Short Speech Penalty", value=penalties.short_speech_penalty, reason="Short usable speech cannot support a high-confidence score."))
+    if penalties.low_confidence_penalty:
+        penalty_items.append(ScoreComponentItem(id="low_confidence_penalty", label="Low Confidence Penalty", value=penalties.low_confidence_penalty, reason="Low scoring confidence reduces precision and score inflation."))
+    if penalties.audio_quality_penalty:
+        penalty_items.append(ScoreComponentItem(id="audio_quality_penalty", label="Audio Quality Penalty", value=penalties.audio_quality_penalty, reason="Poor signal quality limits reliable scoring."))
 
     bonus_total = bonuses.opening_strength + bonuses.ending_strength + bonuses.consistency_bonus
     penalty_total = sum(
@@ -609,7 +635,7 @@ def compute_authority_score(
         calibration_metadata=CalibrationMetadata(
             latent_score=latent_score,
             calibrated_score=final_score,
-            calibration_notes=notes,
+            calibration_notes=notes + ([f"scenario:{profile.scenario_id}"] if profile.scenario_id != "benchmark" else []),
         ),
         fairness_adjustments=fairness,
         score_explanation=ScoreExplanation(
@@ -621,6 +647,18 @@ def compute_authority_score(
         score_band_label=band_label,
         score_interpretation=interpretation,
         score_rarity_label=rarity,
+        scenario_used=profile.scenario_id,
+        scenario_weight_version=WEIGHT_VERSION,
+        scenario_adjustments=ScenarioAdjustment(
+            scenario_used=profile.scenario_id,
+            scenario_weight_version=WEIGHT_VERSION,
+            scenario_adjustments={
+                "penalty_scaling_count": float(sum(1 for value in profile.penalty_multipliers.values() if value != 1.0)),
+                "bonus_scaling_count": float(sum(1 for value in profile.bonus_multipliers.values() if value != 1.0)),
+            },
+            dimension_adjustments={dimension: round(dimension_weights[dimension] - DIMENSION_WEIGHTS[dimension], 4) for dimension in DIMENSION_WEIGHTS},
+            major_weight_changes=major_weight_changes(profile.scenario_id),
+        ),
     )
 
     return ScoringResult(

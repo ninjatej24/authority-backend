@@ -18,6 +18,7 @@ from schemas import (
     Scores,
     Uncertainty,
 )
+from services.scenario_profiles import calculate_trait_relevance
 
 
 @dataclass(frozen=True)
@@ -419,8 +420,12 @@ def _build_traits(
             uncertainty_reason = "Recording uncertainty lowered confidence"
 
         scenario_adjustments = dict(rule.scenario_adjustments or {})
-        if scenario and scenario not in scenario_adjustments:
-            scenario_adjustments[scenario] = 1.0
+        relevance = calculate_trait_relevance(rule.id, scenario)
+        scenario_adjustments[scenario or "benchmark"] = relevance
+        if relevance != 1.0:
+            confidence = _clamp(confidence * (0.92 + relevance * 0.08))
+            if confidence < 0.4:
+                suppress = True
 
         traits.append(
             PsychologicalTrait(

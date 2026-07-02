@@ -155,6 +155,14 @@ class ScoreExplanation(BaseModel):
     component_summary: list[ScoreComponentItem] = Field(default_factory=list)
 
 
+class ScenarioAdjustment(BaseModel):
+    scenario_used: str = "benchmark"
+    scenario_weight_version: str = "scenario_weights_v1"
+    scenario_adjustments: dict[str, float] = Field(default_factory=dict)
+    dimension_adjustments: dict[str, float] = Field(default_factory=dict)
+    major_weight_changes: list[str] = Field(default_factory=list)
+
+
 class Scores(BaseModel):
     authority_score: int
     authority_percentile_estimate: float | None = None
@@ -170,6 +178,9 @@ class Scores(BaseModel):
     score_band_label: str | None = None
     score_interpretation: str | None = None
     score_rarity_label: str | None = None
+    scenario_used: str = "benchmark"
+    scenario_weight_version: str = "scenario_weights_v1"
+    scenario_adjustments: ScenarioAdjustment = Field(default_factory=ScenarioAdjustment)
 
 
 # --- Metrics ---
@@ -569,6 +580,18 @@ class ReportPerceptionMap(BaseModel):
     persuasion_read: ReportPerceptionRead | None = None
 
 
+class ReportScenarioSummary(BaseModel):
+    scenario_id: str = "benchmark"
+    description: str | None = None
+    why_dimensions_changed: list[str] = Field(default_factory=list)
+    scenario_expectations: list[str] = Field(default_factory=list)
+    adjusted_strengths: list[str] = Field(default_factory=list)
+    adjusted_weaknesses: list[str] = Field(default_factory=list)
+    highest_leverage_fix: str | None = None
+    coaching_explanation: str | None = None
+    perception_emphasis: list[str] = Field(default_factory=list)
+
+
 class ReportHiddenCost(BaseModel):
     dimension: str | None = None
     cost_id: str | None = None
@@ -696,6 +719,7 @@ class AuthorityReport(BaseModel):
     authority_type: ReportAuthorityType | None = None
     share_card: ReportShareCard | None = None
     technical_appendix: ReportTechnicalAppendix | None = None
+    scenario_summary: ReportScenarioSummary | None = None
     diagnostic_reasoning: DiagnosticReasoning | None = None
     primary_diagnosis: DiagnosticDiagnosis | None = None
     secondary_diagnosis: DiagnosticDiagnosis | None = None

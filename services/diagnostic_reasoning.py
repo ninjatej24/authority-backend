@@ -21,6 +21,7 @@ from schemas import (
     TraitReasoning,
     Uncertainty,
 )
+from services.scenario_profiles import calculate_dimension_relevance
 
 
 DIMENSIONS = ("command", "clarity", "composure", "presence", "persuasion", "structure")
@@ -449,7 +450,7 @@ def _highest_leverage(
     rule = FIX_RULES[dimension]
     severity = _severity_value(primary.severity)
     evidence_confidence = _clamp(min(primary.confidence, inference.overall_inference_confidence or primary.confidence))
-    scenario_relevance = 1.0 if scenario == "benchmark" else 1.0
+    scenario_relevance = max(calculate_dimension_relevance(dimension, scenario), 0.85)
     selection_score = severity * rule.authority_impact * rule.trainability * evidence_confidence * scenario_relevance
     expected_lift = "high" if selection_score >= 0.55 else "medium" if selection_score >= 0.28 else "low"
     return HighestLeverageReasoning(

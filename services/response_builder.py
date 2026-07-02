@@ -70,6 +70,19 @@ class AnalyzeRequest:
 
 def _map_scenario(context: str) -> str:
     normalized = (context or "initial").strip().lower()
+    supported = {
+        "benchmark",
+        "interview",
+        "leadership",
+        "sales",
+        "founder_pitch",
+        "founder-pitch",
+        "presentation",
+        "meeting",
+        "podcast",
+    }
+    if normalized in supported:
+        return normalized.replace("-", "_")
     if normalized == "impromptu":
         return "impromptu"
     return "benchmark"
@@ -560,6 +573,7 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         audio_quality_usable=audio_quality.usable,
         asr_confidence=transcription.transcript.overall_asr_confidence,
         duration_ms=duration_ms,
+        scenario=_map_scenario(request.context),
     )
 
     perception = build_perception_profile(

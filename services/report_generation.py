@@ -22,6 +22,7 @@ from schemas import (
     ReportPerceptionMap,
     ReportPerceptionRead,
     ReportRetestPlan,
+    ReportScenarioSummary,
     ReportShareCard,
     ReportTechnicalAppendix,
     ReportTimelineItem,
@@ -30,6 +31,7 @@ from schemas import (
     Scores,
     Uncertainty,
 )
+from services.scenario_profiles import get_scenario_profile, major_weight_changes
 
 
 DIMENSION_LABELS = {
@@ -280,6 +282,58 @@ def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityT
     )
 
 
+def _scenario_read_text(read: ReportPerceptionRead | None, scenario_id: str, emphasis: str) -> ReportPerceptionRead | None:
+    if read is None or scenario_id == "benchmark":
+        return read
+    return read.model_copy(update={"text": f"{read.text} This matters more in {scenario_id.replace('_', ' ')} because {emphasis}."})
+
+
+def _apply_scenario_perception(perception_map: ReportPerceptionMap, scenario: str) -> ReportPerceptionMap:
+    profile = get_scenario_profile(scenario)
+    if profile.scenario_id == "benchmark":
+        return perception_map
+    emphasis = ", ".join(profile.expected_speaking_style[:2])
+    updates = {}
+    if "interview_read" in profile.report_emphasis:
+        updates["interview_read"] = _scenario_read_text(perception_map.interview_read, profile.scenario_id, f"answers are expected to be {emphasis}")
+    if "leadership_read" in profile.report_emphasis:
+        updates["leadership_read"] = _scenario_read_text(perception_map.leadership_read, profile.scenario_id, f"listeners look for {emphasis} control")
+    if "persuasion_read" in profile.report_emphasis:
+        updates["persuasion_read"] = _scenario_read_text(perception_map.persuasion_read, profile.scenario_id, "listener pull and trust signals carry extra weight")
+    if "trust_read" in profile.report_emphasis:
+        updates["trust_read"] = _scenario_read_text(perception_map.trust_read, profile.scenario_id, "trust and ease of following shape the read")
+    return perception_map.model_copy(update=updates) if updates else perception_map
+
+
+def _scenario_summary(scores: Scores, fix: ReportHighestLeverageFix, coaching: CoachingEngine | None, scenario: str) -> ReportScenarioSummary:
+    profile = get_scenario_profile(scenario)
+    dims = _dimension_scores(scores)
+    primary = sorted(profile.primary_dimensions, key=lambda dimension: dims.get(dimension, 0), reverse=True)
+    weak = sorted(profile.primary_dimensions + profile.secondary_dimensions, key=lambda dimension: dims.get(dimension, 100))
+    coaching_reason = None
+    if coaching and coaching.selected_interventions.primary_drill:
+        primary_drill = coaching.selected_interventions.primary_drill
+        coaching_reason = (
+            f"{primary_drill.title} is weighted for {profile.scenario_id.replace('_', ' ')} because it targets "
+            f"{', '.join(primary_drill.required_evidence[:2]) or 'scenario-relevant evidence'}."
+        )
+    return ReportScenarioSummary(
+        scenario_id=profile.scenario_id,
+        description=profile.description,
+        why_dimensions_changed=[
+            f"{parts[0]} is {parts[1]} for {profile.scenario_id.replace('_', ' ')}"
+            for change in major_weight_changes(profile.scenario_id)
+            for parts in [change.split(":")]
+        ],
+        scenario_expectations=list(profile.expected_speaking_style),
+        adjusted_strengths=[DIMENSION_LABELS[dimension] for dimension in primary[:2]],
+        adjusted_weaknesses=[DIMENSION_LABELS[dimension] for dimension in weak[:2]],
+        highest_leverage_fix=fix.issue,
+        coaching_explanation=coaching_reason,
+        perception_emphasis=list(profile.report_emphasis),
+    )
+
+
 def _evidence_cards(evidence: list[EvidenceItem], psychological: PsychologicalInference, moments: list[Moment]) -> list[ReportEvidenceCard]:
     cards: list[ReportEvidenceCard] = []
     moment = moments[0] if moments else None
@@ -502,6 +556,7 @@ def _technical_appendix(metrics: Metrics, scores: Scores, audio_quality: AudioQu
     score_components["fairness_adjustments"] = scores.fairness_adjustments.model_dump()
     score_components["score_band"] = scores.score_band
     score_components["score_rarity_label"] = scores.score_rarity_label
+    score_components["scenario_adjustments"] = scores.scenario_adjustments.model_dump()
     return ReportTechnicalAppendix(metrics=selected, audio_quality_warnings=audio_quality.quality_warnings, score_components=score_components, evidence_ids=evidence_ids)
 
 
@@ -571,7 +626,7 @@ def build_generated_report(
     duration_ms: int,
     scenario: str,
 ) -> AuthorityReport:
-    del scenario
+    profile = get_scenario_profile(scenario)
     confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
     confidence_label = _confidence_label(confidence)
     evidence_cards = _evidence_cards(evidence, psychological_inference, moments)
@@ -584,7 +639,7 @@ def build_generated_report(
     authority_type = _authority_type(scores, evidence_ids, confidence)
     mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids)
     diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids)
-    perception_map = _perception_map(diagnosis, authority_type, confidence, evidence_ids)
+    perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, confidence, evidence_ids), profile.scenario_id)
     timeline = _timeline(moments, evidence_ids)
     dimension_reports = _dimension_reports(scores, diagnostic_reasoning, evidence_ids, confidence)
     hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, confidence)
@@ -614,6 +669,7 @@ def build_generated_report(
         authority_type=authority_type,
         share_card=share_card,
         technical_appendix=appendix,
+        scenario_summary=_scenario_summary(scores, fix, coaching_engine, profile.scenario_id),
         diagnostic_reasoning=diagnostic_reasoning,
         primary_diagnosis=diagnostic_reasoning.primary_diagnosis,
         secondary_diagnosis=diagnostic_reasoning.secondary_diagnosis,
