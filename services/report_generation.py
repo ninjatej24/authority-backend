@@ -407,6 +407,20 @@ def _hidden_cost_sentence(effect: str | None) -> str:
     }.get(effect or "", "The hidden cost is a reduced authority signal in this recording.")
 
 
+def _expected_score_lift_label(primary, reasoning) -> str | None:
+    if reasoning and reasoning.expected_score_lift:
+        return reasoning.expected_score_lift
+    if not primary:
+        return None
+
+    lift = primary.expected_impact.authority_score
+    if lift >= 4.0:
+        return "high"
+    if lift >= 2.0:
+        return "medium"
+    return "low"
+
+
 def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: DiagnosticReasoning, evidence_ids: list[str]) -> ReportHighestLeverageFix:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
@@ -417,7 +431,7 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
         issue=drill.title if drill else (reasoning.issue_id.replace("_", " ") if reasoning and reasoning.issue_id else None),
         plain_english=drill.description if drill else (reasoning.plain_reason if reasoning else None),
         why_this_matters=drill.description if drill else (reasoning.plain_reason if reasoning else None),
-        expected_score_lift=primary.expected_impact.confidence and primary.expected_score_lift if primary and hasattr(primary, "expected_score_lift") else (reasoning.expected_score_lift if reasoning else None),
+        expected_score_lift=_expected_score_lift_label(primary, reasoning),
         target_dimensions=drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else []),
         first_drill_id=drill.drill_id if drill else (reasoning.recommended_first_drill if reasoning else None),
         selection_score=primary.score if primary else (reasoning.selection_score if reasoning else 0.0),
