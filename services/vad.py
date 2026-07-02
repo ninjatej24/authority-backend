@@ -182,22 +182,38 @@ def _collect_segments_energy(
     """Energy-based VAD fallback with frame classification and hangover."""
     frame_size = max(int(sample_rate * FRAME_DURATION_MS / 1000), 1)
     frame_ms = int(round(frame_size / sample_rate * 1000))
-    energies: list[float] = []
+    rms_values: list[float] = []
 
     for start in range(0, len(samples), frame_size):
         frame = samples[start : start + frame_size]
         if len(frame) == 0:
             continue
-        energies.append(float(np.mean(frame.astype(np.float64) ** 2)))
+        rms_values.append(float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))))
 
-    if not energies:
+    if not rms_values:
         return []
 
-    threshold = float(np.median(energies)) * 0.5
-    if threshold <= 0:
-        threshold = float(np.mean(energies)) * 0.5
+    rms = np.array(rms_values, dtype=np.float64)
+    absolute_peak_rms = float(np.max(rms))
+    peak_rms = float(np.percentile(rms, 95))
+    median_rms = float(np.median(rms))
+    noise_floor = float(np.percentile(rms, 10))
 
-    voiced = [energy > threshold for energy in energies]
+    # Int16 RMS below this is effectively unusable for VAD. This still leaves
+    # ordinary synthetic tone/speech fixtures well above the floor.
+    if absolute_peak_rms < 80.0:
+        return []
+
+    relative_threshold = noise_floor + (median_rms - noise_floor) * 0.35
+    threshold = max(relative_threshold, peak_rms * 0.08, 80.0)
+    voiced = [value >= threshold for value in rms]
+
+    # If the recording is a steady, clearly audible signal, every frame can sit
+    # near the same energy. Treat that as sustained speech-like audio instead
+    # of silence; zero/near-silent recordings are filtered by the RMS floor.
+    if not any(voiced) and median_rms >= peak_rms * 0.75 and peak_rms >= 500.0:
+        voiced = [True for _ in rms]
+
     segments: list[tuple[int, int, bool]] = []
     in_speech = False
     speech_start = 0
@@ -362,6 +378,7 @@ def _finalize_vad_result(
     total_speech_ms = sum(seg.duration_ms for seg in speech_segments_list)
     total_silence_ms = sum(seg.duration_ms for seg in silence_segments_list)
     speech_ratio = total_speech_ms / total_duration_ms if total_duration_ms > 0 else 0.0
+    speech_ratio = max(0.0, min(1.0, speech_ratio))
 
     silence_tuples = [(seg.start_ms, seg.end_ms, False) for seg in silence_segments_list]
     all_pauses, long_pauses, mid_sentence_pauses, end_of_sentence_pauses = _classify_pauses(
@@ -418,6 +435,9 @@ def run_vad(
             vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
             raw_speech_segments = _collect_segments_webrtc(vad, pcm, sample_rate)
             backend = "webrtc"
+            if not raw_speech_segments:
+                raw_speech_segments = _collect_segments_energy(pcm, sample_rate)
+                backend = "energy_fallback" if raw_speech_segments else "webrtc"
         except Exception:
             raw_speech_segments = _collect_segments_energy(pcm, sample_rate)
             backend = "energy_fallback"

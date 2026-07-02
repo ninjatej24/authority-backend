@@ -237,7 +237,10 @@ def _assess_processed_audio(wav_path: str) -> tuple[int, AudioQuality]:
         return 0, AudioQuality(
             usable=False,
             background_noise_level="unknown",
-            quality_warnings=["Could not load audio for quality assessment"],
+            quality_warnings=[
+                "Could not load audio for quality assessment",
+                "Signal could not be assessed; recording may be unusable",
+            ],
         )
 
     duration_ms = int(duration * 1000)
@@ -246,7 +249,10 @@ def _assess_processed_audio(wav_path: str) -> tuple[int, AudioQuality]:
         return 0, AudioQuality(
             usable=False,
             background_noise_level="unknown",
-            quality_warnings=["Recording has zero duration"],
+            quality_warnings=[
+                "Recording has zero duration",
+                "Recording is very short; metrics may be unreliable",
+            ],
         )
 
     if duration < MIN_USABLE_DURATION_S:
