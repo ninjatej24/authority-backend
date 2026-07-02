@@ -43,6 +43,7 @@ from services.inference_engine import (
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 from services.moments import build_moments
 from services.psychological_inference import build_psychological_inference
+from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
 from services.transcription import transcribe_audio
@@ -481,6 +482,17 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         scenario=_map_scenario(request.context),
         asr_confidence=transcription.transcript.overall_asr_confidence,
     )
+    report = build_report(
+        scores=scores,
+        metrics=metrics_payload,
+        psychological_inference=psychological_inference,
+        evidence=evidence,
+        moments=moments,
+        uncertainty=uncertainty,
+        audio_quality=audio_quality,
+        duration_ms=duration_ms,
+        scenario=_map_scenario(request.context),
+    )
 
     recommendations = build_recommendations(feedback, delivery_metrics)
     drills = build_drills(feedback, delivery_metrics, scoring.dimension_map)
@@ -507,5 +519,6 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         recommendations=recommendations,
         drills=drills,
         psychological_inference=psychological_inference,
+        report=report,
         uncertainty=uncertainty,
     )

@@ -264,3 +264,13 @@ def test_analyze_returns_milestone3_metrics(
     assert len(payload["psychological_inference"]["micro_behaviours"]) >= 25
     assert len(payload["psychological_inference"]["traits"]) >= 20
     assert payload["psychological_inference"]["evidence_chain"]
+
+    report = payload["report"]
+    assert report["mirror"]["evidence_ids"]
+    assert report["diagnosis"]["supporting_evidence_ids"]
+    assert report["perception_map"]["first_impression"]["evidence_ids"]
+    assert report["highest_leverage_fix"]["first_drill_id"]
+    assert report["training_prescription"]["drill_id"]
+    assert report["authority_type"]["label"]
+    assert report["share_card"]["share_safety"] == "public_safe"
+    assert report["technical_appendix"]["metrics"]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -461,6 +461,128 @@ class Safety(BaseModel):
     )
 
 
+# --- Report ---
+
+
+class ReportMirror(BaseModel):
+    headline: str | None = None
+    identity_read: str | None = None
+    core_tension: str | None = None
+    emotional_tone: str | None = None
+    authority_type: str | None = None
+    confidence_label: Literal["low", "medium", "medium_high", "high"] = "low"
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ReportDiagnosis(BaseModel):
+    strongest_dimension: str | None = None
+    limiting_dimension: str | None = None
+    core_behavioural_pattern: str | None = None
+    social_consequence: str | None = None
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    severity: Literal["low", "medium", "high"] | None = None
+
+
+class ReportPerceptionRead(BaseModel):
+    label: str | None = None
+    text: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class ReportPerceptionMap(BaseModel):
+    first_impression: ReportPerceptionRead | None = None
+    professional_read: ReportPerceptionRead | None = None
+    leadership_read: ReportPerceptionRead | None = None
+    interview_read: ReportPerceptionRead | None = None
+    social_status_read: ReportPerceptionRead | None = None
+    emotional_read: ReportPerceptionRead | None = None
+    trust_read: ReportPerceptionRead | None = None
+    persuasion_read: ReportPerceptionRead | None = None
+
+
+class ReportHiddenCost(BaseModel):
+    dimension: str | None = None
+    cost_id: str | None = None
+    consequence: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class ReportHighestLeverageFix(BaseModel):
+    issue: str | None = None
+    plain_english: str | None = None
+    why_this_matters: str | None = None
+    expected_score_lift: Literal["low", "medium", "high"] | None = None
+    target_dimensions: list[str] = Field(default_factory=list)
+    first_drill_id: str | None = None
+    selection_score: float = 0.0
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ReportTrainingPrescription(BaseModel):
+    drill_id: str | None = None
+    title: str | None = None
+    why_chosen: str | None = None
+    instructions: list[str] = Field(default_factory=list)
+    target_metrics: list[str] = Field(default_factory=list)
+    success_signal: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ReportRetestPlan(BaseModel):
+    recommended_retest_after_days: int | None = None
+    focus_metric: str | None = None
+    compare_metrics: list[str] = Field(default_factory=list)
+    same_prompt_recommended: bool = True
+    success_definition: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ReportAuthorityType(BaseModel):
+    type_id: str | None = None
+    label: str | None = None
+    description: str | None = None
+    top_dimensions: list[str] = Field(default_factory=list)
+    growth_dimensions: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class ReportShareCard(BaseModel):
+    authority_score: int | None = None
+    authority_type: str | None = None
+    top_strength: str | None = None
+    growth_area: str | None = None
+    one_line_identity_read: str | None = None
+    percentile_label: str | None = None
+    share_safety: str = "public_safe"
+    hidden_private_findings: list[str] = Field(default_factory=list)
+
+
+class ReportTechnicalAppendix(BaseModel):
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    audio_quality_warnings: list[str] = Field(default_factory=list)
+    score_components: dict[str, Any] = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AuthorityReport(BaseModel):
+    mirror: ReportMirror | None = None
+    diagnosis: ReportDiagnosis | None = None
+    perception_map: ReportPerceptionMap | None = None
+    evidence_chain: list[PsychologicalEvidenceSignal] = Field(default_factory=list)
+    timeline: list[Moment] = Field(default_factory=list)
+    hidden_cost: ReportHiddenCost | None = None
+    highest_leverage_fix: ReportHighestLeverageFix | None = None
+    training_prescription: ReportTrainingPrescription | None = None
+    retest_plan: ReportRetestPlan | None = None
+    authority_type: ReportAuthorityType | None = None
+    share_card: ReportShareCard | None = None
+    technical_appendix: ReportTechnicalAppendix | None = None
+    uncertainty: Uncertainty = Field(default_factory=Uncertainty)
+
+
 # --- Top-level response ---
 
 
@@ -484,6 +606,7 @@ class AuthorityV2Response(BaseModel):
     psychological_inference: PsychologicalInference = Field(
         default_factory=PsychologicalInference
     )
+    report: AuthorityReport = Field(default_factory=AuthorityReport)
     progress: Progress = Field(default_factory=Progress)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
