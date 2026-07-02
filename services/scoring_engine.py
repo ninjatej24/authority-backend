@@ -422,7 +422,7 @@ def _confidence(
     acoustic: AcousticAnalysisResult | None,
     audio_quality_penalty: float,
 ) -> tuple[float, str, list[str], float]:
-    confidence = 0.86
+    confidence = 0.84
     reasons: list[str] = []
     if failure:
         confidence -= 0.25
@@ -437,12 +437,21 @@ def _confidence(
         confidence -= 0.14
         reasons.append("ASR confidence was low")
     speech_seconds = acoustic.speaking_seconds if acoustic else 0.0
+    evidence_consistency_high = False
+    if acoustic:
+        continuity = acoustic.derived.speech_continuity_score or 0.0
+        rhythm = acoustic.derived.rhythm_index or 0.0
+        emphasis = acoustic.derived.dynamic_emphasis_score or 0.0
+        evidence_consistency_high = continuity >= 0.9 and rhythm >= 0.85 and emphasis >= 0.85
     if speech_seconds and speech_seconds < 8:
         confidence -= 0.16
         reasons.append("Very short usable speech")
     elif duration_ms is not None and duration_ms < 8000:
         confidence -= 0.12
         reasons.append("Short recording")
+    elif speech_seconds and speech_seconds <= 75 and not evidence_consistency_high:
+        confidence -= 0.06
+        reasons.append("Single benchmark recording limits score certainty")
     if acoustic and acoustic.derived.monotony_index is None:
         confidence -= 0.05
         reasons.append("Some derived acoustic metrics were unavailable")
@@ -569,7 +578,7 @@ def compute_authority_score(
         score_confidence=confidence,
     )
     capped_score = min(calibrated, *(cap.value for cap in caps)) if caps else calibrated
-    final_score = int(round(_clamp(capped_score, 25, 97)))
+    final_score = int(round(_clamp(capped_score, 20, 97)))
     band, band_label, interpretation, rarity = _score_band(final_score)
 
     derived_axes = compute_derived_axes(dimensions, delivery_metrics)

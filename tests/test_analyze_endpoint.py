@@ -140,7 +140,7 @@ def test_analyze_returns_valid_authority_v2(
     assert model.schema_version == "authority.v2"
     assert model.request.scenario == "benchmark"
     assert model.transcript.full_text
-    assert 25 <= model.scores.authority_score <= 95
+    assert 20 <= model.scores.authority_score <= 97
     assert model.scores.dimension_scores.command >= 20
     assert model.recommendations.fastest_improvement_tip
     assert model.paywall.locked_modules

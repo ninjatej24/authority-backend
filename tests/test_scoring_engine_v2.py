@@ -161,7 +161,7 @@ def test_elite_scores_are_capped_unless_profile_is_extremely_clean():
         acoustic=_acoustic(monotony_index=0.02, dynamic_emphasis_score=0.95, speech_continuity_score=0.94, projection_index=0.9, rhythm_index=0.92),
     )
     assert pretty_good.authority_score < 92
-    assert excellent.authority_score >= 90
+    assert 90 <= excellent.authority_score <= 97
 
 
 def test_score_spread_across_bad_average_good_excellent_profiles():
@@ -182,7 +182,16 @@ def test_score_spread_across_bad_average_good_excellent_profiles():
         acoustic=_acoustic(monotony_index=0.02, dynamic_emphasis_score=0.95, speech_continuity_score=0.94, projection_index=0.9, rhythm_index=0.92),
     )
     assert bad.authority_score < average.authority_score < good.authority_score < excellent.authority_score
+    assert bad.authority_score < 25
     assert average.authority_score != 64
+
+
+def test_normal_valid_profile_scores_reasonably_with_sample_limitation_reason():
+    scores = _score()
+
+    assert 53 <= scores.authority_score <= 80
+    assert scores.score_confidence < 0.8
+    assert "single benchmark recording" in " ".join(scores.score_explanation.confidence_reasons).lower()
 
 
 def test_absolute_pitch_alone_is_suppressed_by_fairness_rules():
