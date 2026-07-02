@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from schemas import (
     AudioQuality,
     AuthorityReport,
+    DiagnosticDiagnosis,
+    DiagnosticReasoning,
     EvidenceItem,
+    HiddenCostReasoning,
+    HighestLeverageReasoning,
     Metrics,
     Moment,
     PsychologicalInference,
@@ -383,7 +387,20 @@ def _diagnosis(
     scores: Scores,
     psychological_inference: PsychologicalInference,
     evidence_ids: list[str],
+    diagnostic: DiagnosticDiagnosis | None = None,
 ) -> ReportDiagnosis:
+    if diagnostic:
+        strongest = diagnostic.affected_dimensions[0] if diagnostic.affected_dimensions else None
+        limiter = diagnostic.affected_dimensions[-1] if diagnostic.affected_dimensions else None
+        return ReportDiagnosis(
+            strongest_dimension=strongest,
+            limiting_dimension=limiter,
+            core_behavioural_pattern=diagnostic.diagnosis_id,
+            social_consequence=diagnostic.diagnosis_name,
+            supporting_evidence_ids=diagnostic.supporting_evidence_ids,
+            severity=diagnostic.severity,
+        )
+
     ordered = _ordered_dimensions(scores)
     strongest_key, strongest_score = ordered[0]
     limiting_key, limiting_score = sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0]
@@ -488,7 +505,21 @@ def _perception_map(
     )
 
 
-def _hidden_cost(diagnosis: ReportDiagnosis, evidence_ids: list[str], confidence: float) -> ReportHiddenCost:
+def _hidden_cost(
+    diagnosis: ReportDiagnosis,
+    evidence_ids: list[str],
+    confidence: float,
+    reasoning: HiddenCostReasoning | None = None,
+) -> ReportHiddenCost:
+    if reasoning:
+        return ReportHiddenCost(
+            dimension=diagnosis.limiting_dimension,
+            cost_id=reasoning.cost_id,
+            consequence=reasoning.listener_effect,
+            evidence_ids=reasoning.evidence_ids,
+            confidence=round(reasoning.confidence, 2),
+        )
+
     dimension = (diagnosis.limiting_dimension or "Command").lower()
     consequence = {
         "command": "The hidden cost is that listeners may understand you and still not feel fully led by you.",
@@ -512,7 +543,20 @@ def _fix(
     psychological_inference: PsychologicalInference,
     evidence_ids: list[str],
     scenario: str,
+    reasoning: HighestLeverageReasoning | None = None,
 ) -> ReportHighestLeverageFix:
+    if reasoning:
+        return ReportHighestLeverageFix(
+            issue=(reasoning.issue_id or "").replace("_", " ") or None,
+            plain_english=reasoning.plain_reason,
+            why_this_matters=reasoning.plain_reason,
+            expected_score_lift=reasoning.expected_score_lift,
+            target_dimensions=list(reasoning.affected_dimensions),
+            first_drill_id=reasoning.recommended_first_drill,
+            selection_score=reasoning.selection_score,
+            evidence_ids=reasoning.supporting_evidence,
+        )
+
     dimension_key = (diagnosis.limiting_dimension or "Command").lower()
     rule = FIX_RULES.get(dimension_key, FIX_RULES["command"])
     severity = _severity_value(diagnosis.severity)
@@ -603,6 +647,7 @@ def build_report(
     scores: Scores,
     metrics: Metrics,
     psychological_inference: PsychologicalInference,
+    diagnostic_reasoning: DiagnosticReasoning,
     evidence: list[EvidenceItem],
     moments: list[Moment],
     uncertainty: Uncertainty,
@@ -615,7 +660,12 @@ def build_report(
         max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0),
         0.95,
     )
-    evidence_ids = _primary_evidence_ids(psychological_inference, evidence)
+    primary_diagnosis = diagnostic_reasoning.primary_diagnosis
+    evidence_ids = (
+        list(primary_diagnosis.supporting_evidence_ids)
+        if primary_diagnosis and primary_diagnosis.supporting_evidence_ids
+        else _primary_evidence_ids(psychological_inference, evidence)
+    )
     if not audio_quality.usable and report_confidence < 0.4:
         evidence_ids = evidence_ids[:2]
 
@@ -625,10 +675,26 @@ def build_report(
     authority_type = _authority_type(scores, psychological_inference, evidence_ids)
     confidence_label = _confidence_label(report_confidence)
     mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids)
-    diagnosis = _diagnosis(scores, psychological_inference, evidence_ids)
+    diagnosis = _diagnosis(
+        scores,
+        psychological_inference,
+        evidence_ids,
+        diagnostic=primary_diagnosis,
+    )
     perception_map = _perception_map(scores, diagnosis, authority_type, evidence_ids, report_confidence)
-    hidden_cost = _hidden_cost(diagnosis, evidence_ids, report_confidence)
-    fix = _fix(diagnosis, psychological_inference, evidence_ids, scenario)
+    hidden_cost = _hidden_cost(
+        diagnosis,
+        evidence_ids,
+        report_confidence,
+        reasoning=diagnostic_reasoning.hidden_cost_reasoning,
+    )
+    fix = _fix(
+        diagnosis,
+        psychological_inference,
+        evidence_ids,
+        scenario,
+        reasoning=diagnostic_reasoning.highest_leverage_reasoning,
+    )
     training = _training(fix)
     retest = _retest(fix, duration_ms)
     share_card = _share_card(scores, authority_type, mirror, diagnosis)
@@ -637,7 +703,13 @@ def build_report(
     report_uncertainty = Uncertainty(
         overall_confidence_label=confidence_label,  # type: ignore[arg-type]
         suppressed_traits=psychological_inference.suppressed_traits,
-        reasons=list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons)),
+            reasons=list(
+                dict.fromkeys(
+                    uncertainty.reasons
+                    + psychological_inference.uncertainty.reasons
+                    + diagnostic_reasoning.uncertainty.reasons
+                )
+            ),
     )
 
     if duration_ms and duration_ms < 25000:
@@ -656,5 +728,13 @@ def build_report(
         authority_type=authority_type,
         share_card=share_card,
         technical_appendix=appendix,
+        diagnostic_reasoning=diagnostic_reasoning,
+        primary_diagnosis=diagnostic_reasoning.primary_diagnosis,
+        secondary_diagnosis=diagnostic_reasoning.secondary_diagnosis,
+        contradictions=diagnostic_reasoning.contradictions,
+        hidden_cost_reasoning=diagnostic_reasoning.hidden_cost_reasoning,
+        dimension_reasoning=diagnostic_reasoning.dimension_reasoning,
+        trait_reasoning=diagnostic_reasoning.trait_reasoning,
+        highest_leverage_reasoning=diagnostic_reasoning.highest_leverage_reasoning,
         uncertainty=report_uncertainty,
     )

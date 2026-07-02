@@ -580,7 +580,107 @@ class AuthorityReport(BaseModel):
     authority_type: ReportAuthorityType | None = None
     share_card: ReportShareCard | None = None
     technical_appendix: ReportTechnicalAppendix | None = None
+    diagnostic_reasoning: DiagnosticReasoning | None = None
+    primary_diagnosis: DiagnosticDiagnosis | None = None
+    secondary_diagnosis: DiagnosticDiagnosis | None = None
+    contradictions: list[DiagnosticContradiction] = Field(default_factory=list)
+    hidden_cost_reasoning: HiddenCostReasoning | None = None
+    dimension_reasoning: dict[str, DimensionReasoning] = Field(default_factory=dict)
+    trait_reasoning: dict[str, TraitReasoning] = Field(default_factory=dict)
+    highest_leverage_reasoning: HighestLeverageReasoning | None = None
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
+
+
+# --- Diagnostic reasoning ---
+
+
+class DiagnosticDiagnosis(BaseModel):
+    diagnosis_id: str
+    diagnosis_name: str
+    confidence: float
+    severity: Literal["low", "medium", "high"]
+    supporting_traits: list[str] = Field(default_factory=list)
+    contradicting_traits: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    supporting_moment_ids: list[str] = Field(default_factory=list)
+    affected_dimensions: list[str] = Field(default_factory=list)
+
+
+class DiagnosticContradiction(BaseModel):
+    contradiction_id: str
+    strength: str
+    limiter: str
+    why_it_happens: list[str] = Field(default_factory=list)
+    listener_effect: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float
+
+
+class HiddenCostReasoning(BaseModel):
+    cost_id: str | None = None
+    source_signal: str | None = None
+    interpretation: str | None = None
+    consequence: str | None = None
+    listener_effect: str | None = None
+    affected_dimensions: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    moment_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class HighestLeverageReasoning(BaseModel):
+    issue_id: str | None = None
+    plain_reason: str | None = None
+    affected_dimensions: list[str] = Field(default_factory=list)
+    supporting_evidence: list[str] = Field(default_factory=list)
+    expected_score_lift: Literal["low", "medium", "high"] | None = None
+    recommended_first_drill: str | None = None
+    confidence: float = 0.0
+    severity: float = 0.0
+    authority_impact: float = 0.0
+    trainability: float = 0.0
+    evidence_confidence: float = 0.0
+    scenario_relevance: float = 1.0
+    selection_score: float = 0.0
+
+
+class DimensionReasoning(BaseModel):
+    dimension: str
+    score: int
+    why_score_is_high: list[str] = Field(default_factory=list)
+    why_score_is_low: list[str] = Field(default_factory=list)
+    largest_positive_signal: str | None = None
+    largest_negative_signal: str | None = None
+    biggest_metric_contributor: str | None = None
+    biggest_linguistic_contributor: str | None = None
+    biggest_behavioural_contributor: str | None = None
+    confidence: float = 0.0
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+
+
+class TraitReasoning(BaseModel):
+    trait_id: str
+    label: str
+    positive_evidence: list[str] = Field(default_factory=list)
+    negative_evidence: list[str] = Field(default_factory=list)
+    confidence: float
+    suppression_reason: str | None = None
+    supporting_metrics: list[str] = Field(default_factory=list)
+    supporting_moments: list[str] = Field(default_factory=list)
+
+
+class DiagnosticReasoning(BaseModel):
+    primary_diagnosis: DiagnosticDiagnosis | None = None
+    secondary_diagnosis: DiagnosticDiagnosis | None = None
+    suppressed_diagnoses: list[DiagnosticDiagnosis] = Field(default_factory=list)
+    contradictions: list[DiagnosticContradiction] = Field(default_factory=list)
+    hidden_cost_reasoning: HiddenCostReasoning | None = None
+    dimension_reasoning: dict[str, DimensionReasoning] = Field(default_factory=dict)
+    trait_reasoning: dict[str, TraitReasoning] = Field(default_factory=dict)
+    highest_leverage_reasoning: HighestLeverageReasoning | None = None
+    uncertainty: Uncertainty = Field(default_factory=Uncertainty)
+
+
 
 
 # --- Top-level response ---

@@ -22,6 +22,7 @@ from services.articulation import analyze_articulation
 from services.audio_preprocessing import preprocess_audio
 from services.coaching_engine import build_drills, build_recommendations, generate_feedback
 from services.derived_indices import calculate_derived_indices
+from services.diagnostic_reasoning import build_diagnostic_reasoning
 from services.evidence import (
     EvidenceCollection,
     add_articulation_evidence,
@@ -482,10 +483,22 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         scenario=_map_scenario(request.context),
         asr_confidence=transcription.transcript.overall_asr_confidence,
     )
+    diagnostic_reasoning = build_diagnostic_reasoning(
+        metrics=metrics_payload,
+        psychological_inference=psychological_inference,
+        evidence=evidence,
+        moments=moments,
+        scores=scores,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario=_map_scenario(request.context),
+    )
     report = build_report(
         scores=scores,
         metrics=metrics_payload,
         psychological_inference=psychological_inference,
+        diagnostic_reasoning=diagnostic_reasoning,
         evidence=evidence,
         moments=moments,
         uncertainty=uncertainty,

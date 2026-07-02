@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from schemas import AudioQuality, EvidenceItem, Moment, Uncertainty
+from services.diagnostic_reasoning import build_diagnostic_reasoning
 from services.report_builder import build_report
 from tests.test_psychological_inference import _infer, _metrics, _scores
 
@@ -64,16 +65,35 @@ def _report(**kwargs):
         Uncertainty(overall_confidence_label="medium_high", reasons=[]),
     )
     inference = kwargs.pop("inference", _infer(metrics, audio_quality=audio_quality))
+    evidence = kwargs.pop("evidence", _evidence())
+    moments = kwargs.pop("moments", _moments())
+    duration_ms = kwargs.pop("duration_ms", 60000)
+    scenario = kwargs.pop("scenario", "benchmark")
+    diagnostic_reasoning = kwargs.pop(
+        "diagnostic_reasoning",
+        build_diagnostic_reasoning(
+            metrics=metrics,
+            psychological_inference=inference,
+            evidence=evidence,
+            moments=moments,
+            scores=scores,
+            audio_quality=audio_quality,
+            uncertainty=uncertainty,
+            duration_ms=duration_ms,
+            scenario=scenario,
+        ),
+    )
     return build_report(
         scores=scores,
         metrics=metrics,
         psychological_inference=inference,
-        evidence=kwargs.pop("evidence", _evidence()),
-        moments=kwargs.pop("moments", _moments()),
+        diagnostic_reasoning=diagnostic_reasoning,
+        evidence=evidence,
+        moments=moments,
         uncertainty=uncertainty,
         audio_quality=audio_quality,
-        duration_ms=kwargs.pop("duration_ms", 60000),
-        scenario=kwargs.pop("scenario", "benchmark"),
+        duration_ms=duration_ms,
+        scenario=scenario,
     )
 
 
@@ -90,6 +110,10 @@ def test_report_builder_populates_all_major_sections_with_evidence_ids():
     assert report.authority_type is not None
     assert report.share_card is not None
     assert report.technical_appendix is not None
+    assert report.diagnostic_reasoning is not None
+    assert report.primary_diagnosis is not None
+    assert report.hidden_cost_reasoning is not None
+    assert report.highest_leverage_reasoning is not None
 
     assert report.mirror.evidence_ids
     assert report.diagnosis.supporting_evidence_ids
@@ -100,6 +124,9 @@ def test_report_builder_populates_all_major_sections_with_evidence_ids():
     assert report.authority_type.evidence_ids
     assert report.technical_appendix.evidence_ids
     assert report.perception_map.first_impression.evidence_ids
+    assert report.primary_diagnosis.supporting_evidence_ids
+    assert report.hidden_cost_reasoning.evidence_ids
+    assert report.highest_leverage_reasoning.supporting_evidence
 
 
 def test_highest_leverage_fix_and_training_are_deterministic_from_limiter():

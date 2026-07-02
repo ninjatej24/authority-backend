@@ -274,3 +274,6 @@ def test_analyze_returns_milestone3_metrics(
     assert report["authority_type"]["label"]
     assert report["share_card"]["share_safety"] == "public_safe"
     assert report["technical_appendix"]["metrics"]
+    assert report["diagnostic_reasoning"]["dimension_reasoning"]
+    assert report["primary_diagnosis"]["supporting_evidence_ids"]
+    assert report["highest_leverage_reasoning"]["selection_score"] > 0
