@@ -217,6 +217,7 @@ def test_authority_v2_schema_accepts_spec_example():
     assert model.schema_version == "authority.v2"
     assert model.scores.authority_score == 72
     assert len(model.scores.dimension_scores.model_dump()) == 6
+    assert model.psychological_inference.micro_behaviours == []
 
 
 def test_authority_v2_round_trip():

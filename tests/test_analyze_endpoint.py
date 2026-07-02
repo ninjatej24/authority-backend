@@ -260,3 +260,7 @@ def test_analyze_returns_milestone3_metrics(
     assert "metric_evidence" in payload
     assert len(payload["metric_evidence"]["vad"]) > 0
     assert len(payload["metric_evidence"]["rhythm"]) > 0
+    assert "psychological_inference" in payload
+    assert len(payload["psychological_inference"]["micro_behaviours"]) >= 25
+    assert len(payload["psychological_inference"]["traits"]) >= 20
+    assert payload["psychological_inference"]["evidence_chain"]

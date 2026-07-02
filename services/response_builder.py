@@ -42,6 +42,7 @@ from services.inference_engine import (
 )
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 from services.moments import build_moments
+from services.psychological_inference import build_psychological_inference
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
 from services.transcription import transcribe_audio
@@ -463,6 +464,24 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         }
     )
 
+    metrics_payload = Metrics(
+        raw_acoustic=raw_acoustic,
+        linguistic=linguistic,
+        derived=acoustic.derived,
+        rhythm=rhythm_metrics,
+        articulation=articulation_metrics,
+        vad=vad_metrics,
+    )
+    psychological_inference = build_psychological_inference(
+        metrics=metrics_payload,
+        scores=scores,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario=_map_scenario(request.context),
+        asr_confidence=transcription.transcript.overall_asr_confidence,
+    )
+
     recommendations = build_recommendations(feedback, delivery_metrics)
     drills = build_drills(feedback, delivery_metrics, scoring.dimension_map)
 
@@ -480,19 +499,13 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         audio_quality=audio_quality,
         transcript=transcription.transcript,
         scores=scores,
-        metrics=Metrics(
-            raw_acoustic=raw_acoustic,
-            linguistic=linguistic,
-            derived=acoustic.derived,
-            rhythm=rhythm_metrics,
-            articulation=articulation_metrics,
-            vad=vad_metrics,
-        ),
+        metrics=metrics_payload,
         perception_profile=perception,
         evidence=evidence,
         metric_evidence=MetricEvidenceBundle.model_validate(metric_evidence_payload),
         moments=moments,
         recommendations=recommendations,
         drills=drills,
+        psychological_inference=psychological_inference,
         uncertainty=uncertainty,
     )

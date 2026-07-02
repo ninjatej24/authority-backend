@@ -295,6 +295,86 @@ class MetricEvidenceBundle(BaseModel):
     window_features: list[MetricEvidenceItem] = Field(default_factory=list)
 
 
+# --- Psychological inference ---
+
+
+class PsychologicalEvidenceSignal(BaseModel):
+    evidence_id: str
+    metric: str
+    observed_value: float | int | str | bool | None = None
+    expected_range: str
+    direction: Literal["supporting", "contradicting", "uncertainty"]
+    weight: float
+    why_it_matters_psychologically: str
+
+
+class MicroBehaviour(BaseModel):
+    id: str
+    label: str
+    confidence: float
+    supporting_metrics: list[str] = Field(default_factory=list)
+    contradicting_metrics: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    uncertainty_reason: str | None = None
+
+
+class PsychologicalTrait(BaseModel):
+    trait_id: str
+    label: str
+    score: int
+    confidence: float
+    confidence_label: Literal["low", "medium", "medium_high", "high"]
+    supporting_behaviours: list[str] = Field(default_factory=list)
+    contradicting_behaviours: list[str] = Field(default_factory=list)
+    supporting_metrics: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    evidence_chain: list[PsychologicalEvidenceSignal] = Field(default_factory=list)
+    uncertainty_reason: str | None = None
+    suppress_from_report: bool = False
+    scenario_weight_adjustments: dict[str, float] = Field(default_factory=dict)
+
+
+class InferenceCandidate(BaseModel):
+    candidate_id: str
+    label: str
+    trait_ids: list[str] = Field(default_factory=list)
+    behaviour_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float
+
+
+class PsychologicalPrimaryCandidates(BaseModel):
+    primary_strength_candidate: InferenceCandidate | None = None
+    primary_limiter_candidate: InferenceCandidate | None = None
+    core_tension_candidate: InferenceCandidate | None = None
+
+
+class PsychologicalReportCandidates(BaseModel):
+    authority_type_candidates: list[InferenceCandidate] = Field(default_factory=list)
+    strongest_positive_impression: InferenceCandidate | None = None
+    strongest_negative_impression: InferenceCandidate | None = None
+    highest_confidence_trait: str | None = None
+    lowest_confidence_trait: str | None = None
+    report_priority_order: list[str] = Field(default_factory=list)
+    hidden_cost_candidates: list[InferenceCandidate] = Field(default_factory=list)
+    highest_leverage_candidates: list[InferenceCandidate] = Field(default_factory=list)
+
+
+class PsychologicalInference(BaseModel):
+    micro_behaviours: list[MicroBehaviour] = Field(default_factory=list)
+    traits: list[PsychologicalTrait] = Field(default_factory=list)
+    evidence_chain: list[PsychologicalEvidenceSignal] = Field(default_factory=list)
+    primary_candidates: PsychologicalPrimaryCandidates = Field(
+        default_factory=PsychologicalPrimaryCandidates
+    )
+    report_candidates: PsychologicalReportCandidates = Field(
+        default_factory=PsychologicalReportCandidates
+    )
+    overall_inference_confidence: float = 0.0
+    suppressed_traits: list[str] = Field(default_factory=list)
+    uncertainty: Uncertainty = Field(default_factory=lambda: Uncertainty())
+
+
 class Moment(BaseModel):
     moment_id: str
     type: str
@@ -401,6 +481,9 @@ class AuthorityV2Response(BaseModel):
     moments: list[Moment]
     recommendations: Recommendations
     drills: list[Drill]
+    psychological_inference: PsychologicalInference = Field(
+        default_factory=PsychologicalInference
+    )
     progress: Progress = Field(default_factory=Progress)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
