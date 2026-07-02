@@ -156,6 +156,8 @@ def test_analyze_short_silent_file_returns_safe_response(
     model = AuthorityV2Response.model_validate(response.json())
     assert model.audio_quality.usable is False
     assert model.uncertainty.reasons
+    assert model.metrics.vad.speech_ratio is not None
+    assert model.metrics.derived.vocal_command_index is None or model.metrics.derived.vocal_command_index >= 0
 
 
 @patch("services.coaching_engine._get_client")

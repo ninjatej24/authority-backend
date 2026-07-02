@@ -10,6 +10,7 @@ import numpy as np
 import parselmouth
 
 from schemas import DerivedMetrics, RawAcousticMetrics, TranscriptWord
+from services.vad import VADResult, build_silence_frame_mask, pauses_from_vad
 
 VoiceMetrics = dict[str, float]
 
@@ -94,6 +95,7 @@ def extract_acoustic_analysis(
     *,
     audio_usable: bool = True,
     transcript_text: str = "",
+    vad_result: VADResult | None = None,
 ) -> AcousticAnalysisResult:
     """Full deterministic acoustic pipeline."""
     try:
@@ -144,18 +146,29 @@ def extract_acoustic_analysis(
     threshold = energy_mean * 0.55
     threshold = max(threshold, float(np.percentile(intensity_values, 12)))
     threshold = min(threshold, float(np.percentile(intensity_values, 38)))
-    silence_frames = intensity_values < threshold
+    intensity_silence_frames = intensity_values < threshold
 
-    silence_duration = float(np.sum(silence_frames) * frame_duration)
-    silence_ratio = silence_duration / duration
+    if vad_result is not None and vad_result.segments:
+        silence_frames = build_silence_frame_mask(
+            vad_result,
+            frame_duration,
+            len(intensity_values),
+        )
+        pauses = pauses_from_vad(vad_result)
+        speech_duration = max(vad_result.total_speech_duration_ms / 1000.0, 0.01)
+        silence_duration = vad_result.total_silence_duration_ms / 1000.0
+    else:
+        silence_frames = intensity_silence_frames
+        pauses = _detect_pauses(silence_frames, frame_duration)
+        silence_duration = float(np.sum(silence_frames) * frame_duration)
+        speech_duration = max(duration - silence_duration, 0.01)
 
-    pauses = _detect_pauses(silence_frames, frame_duration)
+    silence_ratio = silence_duration / duration if duration > 0 else 0.0
     pause_count = len(pauses)
     avg_pause = float(np.mean(pauses)) if pauses else 0.0
     longest_pause = float(max(pauses)) if pauses else 0.0
-    pause_frequency = pause_count / duration
-    speech_duration = max(duration - silence_duration, 0.01)
-    speech_density = speech_duration / duration
+    pause_frequency = pause_count / duration if duration > 0 else 0.0
+    speech_density = speech_duration / duration if duration > 0 else 0.0
 
     pitch_median = float(np.median(voiced_f0)) if len(voiced_f0) else 0.0
     pitch_mean = float(np.mean(voiced_f0)) if len(voiced_f0) else 0.0
@@ -168,9 +181,15 @@ def extract_acoustic_analysis(
     mid_phrase_pause_rate = _mid_phrase_pause_rate(words, pauses, frame_duration, silence_frames)
     if mid_phrase_pause_rate is None:
         mid_phrase_pause_rate = 0.0
-    
-    # Enhanced pitch contour analysis
-    pitch_contour = _analyze_pitch_contour(pitch_values, pitch_median, frame_duration)
+
+    # Enhanced pitch contour analysis (VAD-aligned phrase boundaries when available)
+    pitch_contour = _analyze_pitch_contour(
+        pitch_values,
+        pitch_median,
+        frame_duration,
+        silence_frames=silence_frames,
+        vad_result=vad_result,
+    )
     
     # Enhanced energy contour analysis
     energy_contour = _analyze_energy_contour(intensity_values, frame_duration)
@@ -346,57 +365,43 @@ def _analyze_pitch_contour(
     pitch_values: np.ndarray,
     pitch_median: float,
     frame_duration: float,
+    *,
+    silence_frames: np.ndarray | None = None,
+    vad_result: VADResult | None = None,
 ) -> dict[str, float]:
     """Enhanced pitch contour analysis including dynamics, resets, and terminal movement."""
     if len(pitch_values) == 0 or pitch_median <= 0:
         return {}
-    
+
     voiced_f0 = pitch_values[pitch_values > 0]
     if len(voiced_f0) < 10:
         return {}
-    
-    # Convert to semitones relative to speaker median
+
     semitones = np.array([_hz_to_semitones(hz, pitch_median) for hz in voiced_f0])
-    
-    # Basic statistics
+
     pitch_mean_hz = float(np.mean(voiced_f0))
     pitch_std_hz = float(np.std(voiced_f0))
     pitch_slope = float(np.polyfit(range(len(semitones)), semitones, 1)[0])
-    
-    # Pitch stability (inverse of variability)
     pitch_stability = 1.0 / (1.0 + float(np.std(semitones)))
-    
-    # Pitch dynamics (rate of change)
     pitch_diffs = np.diff(semitones)
     pitch_dynamics = float(np.mean(np.abs(pitch_diffs)))
-    
-    # Pitch resets (large downward movements suggesting phrase boundaries)
-    reset_threshold = 3.0  # semitones
+    reset_threshold = 3.0
     pitch_resets = int(np.sum(pitch_diffs < -reset_threshold))
-    
-    # Terminal pitch movement analysis
-    terminal_window = max(int(len(semitones) * 0.2), 5)
-    if terminal_window >= len(semitones):
-        terminal_window = len(semitones) - 1
-    
-    if terminal_window > 0:
-        terminal_semitones = semitones[-terminal_window:]
-        terminal_slope = float(np.polyfit(range(len(terminal_semitones)), terminal_semitones, 1)[0])
-        terminal_rising = terminal_slope > 0.5
-        terminal_falling = terminal_slope < -0.5
-        
-        # Count terminal movements across phrase endings
-        # This is a simplified version - full version requires phrase boundary detection
-        terminal_rising_ratio = 0.3 if terminal_rising else 0.1
-        terminal_falling_ratio = 0.5 if terminal_falling else 0.2
-    else:
-        terminal_slope = 0.0
-        terminal_rising = False
-        terminal_falling = False
-        terminal_rising_ratio = 0.0
-        terminal_falling_ratio = 0.0
-    
-    return {
+
+    terminal_ratios = _compute_terminal_intonation_ratios(
+        pitch_values,
+        pitch_median,
+        frame_duration,
+        silence_frames=silence_frames,
+        vad_result=vad_result,
+    )
+    terminal_slope = terminal_ratios.get("terminal_slope", 0.0)
+    terminal_rising = terminal_ratios.get("terminal_rising", 0.0)
+    terminal_falling = terminal_ratios.get("terminal_falling", 0.0)
+    terminal_rising_ratio = terminal_ratios.get("terminal_rising_ratio")
+    terminal_falling_ratio = terminal_ratios.get("terminal_falling_ratio")
+
+    result: dict[str, float] = {
         "pitch_mean_hz": round(pitch_mean_hz, 1),
         "pitch_median_hz": round(pitch_median, 1),
         "pitch_std_hz": round(pitch_std_hz, 1),
@@ -405,11 +410,89 @@ def _analyze_pitch_contour(
         "pitch_dynamics": round(pitch_dynamics, 3),
         "pitch_resets": pitch_resets,
         "terminal_slope": round(terminal_slope, 3),
-        "terminal_rising": 1.0 if terminal_rising else 0.0,
-        "terminal_falling": 1.0 if terminal_falling else 0.0,
-        "terminal_rising_ratio": round(terminal_rising_ratio, 2),
-        "terminal_falling_ratio": round(terminal_falling_ratio, 2),
+        "terminal_rising": terminal_rising,
+        "terminal_falling": terminal_falling,
     }
+    if terminal_rising_ratio is not None:
+        result["terminal_rising_ratio"] = round(terminal_rising_ratio, 2)
+    if terminal_falling_ratio is not None:
+        result["terminal_falling_ratio"] = round(terminal_falling_ratio, 2)
+
+    return result
+
+
+def _compute_terminal_intonation_ratios(
+    pitch_values: np.ndarray,
+    pitch_median: float,
+    frame_duration: float,
+    *,
+    silence_frames: np.ndarray | None = None,
+    vad_result: VADResult | None = None,
+) -> dict[str, float]:
+    """
+    Compute rising/falling ratios across phrase endings using VAD or silence frames.
+
+    Returns null-equivalent omission for ratios when fewer than 2 reliable endings.
+    """
+    if pitch_median <= 0 or len(pitch_values) == 0:
+        return {}
+
+    terminal_frames = max(int(TERMINAL_WINDOW_MS / 1000 / frame_duration), 3)
+    phrase_end_frames: list[int] = []
+
+    if vad_result is not None and vad_result.speech_segments:
+        for segment in vad_result.speech_segments:
+            end_frame = int((segment.end_ms / 1000.0) / frame_duration)
+            if 0 < end_frame < len(pitch_values):
+                phrase_end_frames.append(end_frame)
+    elif silence_frames is not None and len(silence_frames) > 0:
+        i = 0
+        while i < len(silence_frames):
+            if silence_frames[i]:
+                i += 1
+                continue
+            start = i
+            while i < len(silence_frames) and not silence_frames[i]:
+                i += 1
+            end = i
+            if end - start >= terminal_frames * 2:
+                phrase_end_frames.append(end)
+
+    rises = 0
+    falls = 0
+    measured = 0
+    last_slope = 0.0
+
+    for end_frame in phrase_end_frames:
+        start_frame = max(0, end_frame - terminal_frames * 2)
+        segment_f0 = pitch_values[start_frame:end_frame]
+        voiced = segment_f0[segment_f0 > 0]
+        if len(voiced) < terminal_frames:
+            continue
+
+        tail = voiced[-terminal_frames:]
+        semitones = np.array([_hz_to_semitones(hz, pitch_median) for hz in tail])
+        if len(semitones) < 2:
+            continue
+
+        slope = float(np.polyfit(range(len(semitones)), semitones, 1)[0])
+        last_slope = slope
+        measured += 1
+        if slope > 0.5:
+            rises += 1
+        elif slope < -0.5:
+            falls += 1
+
+    result: dict[str, float] = {
+        "terminal_slope": last_slope,
+        "terminal_rising": 1.0 if last_slope > 0.5 else 0.0,
+        "terminal_falling": 1.0 if last_slope < -0.5 else 0.0,
+    }
+    if measured >= 2:
+        result["terminal_rising_ratio"] = rises / measured
+        result["terminal_falling_ratio"] = falls / measured
+
+    return result
 
 
 def _analyze_energy_contour(

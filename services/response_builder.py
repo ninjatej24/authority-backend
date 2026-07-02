@@ -11,6 +11,7 @@ from openai import OpenAI
 from schemas import (
     ArticulationMetrics,
     AuthorityV2Response,
+    MetricEvidenceBundle,
     Metrics,
     RequestMetadata,
     RhythmMetrics,
@@ -31,6 +32,7 @@ from services.evidence import (
     add_rhythm_evidence,
     add_vad_evidence,
     add_voice_quality_evidence,
+    serialize_evidence_collection,
 )
 from services.inference_engine import (
     analyze_cognition,
@@ -43,7 +45,7 @@ from services.moments import build_moments
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
 from services.transcription import transcribe_audio
-from services.vad import run_vad
+from services.vad import prepare_pcm_samples, run_vad
 
 
 @dataclass
@@ -106,6 +108,12 @@ def _score_confidence_adjustment(
     return round(max(0.25, min(0.95, confidence)), 2)
 
 
+def _load_audio_samples(wav_path: str) -> tuple[np.ndarray, int]:
+    sound = parselmouth.Sound(wav_path)
+    samples = sound.values[0] if sound.values.ndim > 1 else sound.values
+    return samples, int(sound.sampling_frequency)
+
+
 def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response:
     """Execute the full v2 analysis pipeline."""
     preprocessed = preprocess_audio(request.file_path)
@@ -121,14 +129,17 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
     )
     text = transcription.transcript.full_text
 
-    # Milestone 3: Run VAD for speech/silence segmentation
+    # Milestone 3: VAD-first segmentation (runs whenever audio exists)
     vad_result = None
-    if audio_quality.usable and duration_ms > 0:
+    if duration_ms > 0:
         try:
-            sound = parselmouth.Sound(wav_path)
-            samples = sound.values[0]
-            sample_rate = sound.sampling_frequency
-            vad_result = run_vad(samples, int(sample_rate), transcription.transcript.words)
+            raw_samples, sample_rate = _load_audio_samples(wav_path)
+            pcm_samples, pcm_rate = prepare_pcm_samples(raw_samples, sample_rate)
+            vad_result = run_vad(
+                pcm_samples,
+                pcm_rate,
+                transcription.transcript.words or None,
+            )
         except Exception:
             vad_result = None
 
@@ -138,15 +149,20 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         duration_ms=duration_ms,
         audio_usable=audio_quality.usable,
         transcript_text=text,
+        vad_result=vad_result,
     )
     voice_metrics = acoustic.voice_metrics
 
-    # Milestone 3: Run rhythm analysis
+    speech_duration_ms = (
+        vad_result.total_speech_duration_ms
+        if vad_result and vad_result.total_speech_duration_ms > 0
+        else int(acoustic.speaking_seconds * 1000)
+    )
+
+    # Milestone 3: rhythm analysis from transcript timestamps
     rhythm_result = None
-    if transcription.transcript.words and audio_quality.usable:
+    if transcription.transcript.words and speech_duration_ms > 0:
         try:
-            from services.rhythm_analysis import analyze_rhythm
-            speech_duration_ms = vad_result.total_speech_duration_ms if vad_result else acoustic.speaking_seconds * 1000
             rhythm_result = analyze_rhythm(
                 words=transcription.transcript.words,
                 transcript_text=text,
@@ -156,12 +172,10 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         except Exception:
             rhythm_result = None
 
-    # Milestone 3: Run articulation analysis
+    # Milestone 3: articulation analysis
     articulation_result = None
-    if transcription.transcript.words and audio_quality.usable:
+    if transcription.transcript.words and speech_duration_ms > 0:
         try:
-            from services.articulation import analyze_articulation
-            speech_duration_ms = vad_result.total_speech_duration_ms if vad_result else acoustic.speaking_seconds * 1000
             articulation_result = analyze_articulation(
                 words=transcription.transcript.words,
                 speech_duration_ms=speech_duration_ms,
@@ -169,21 +183,19 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         except Exception:
             articulation_result = None
 
-    # Milestone 3: Calculate derived indices
+    # Milestone 3: derived indices (null when evidence is insufficient)
     derived_indices = None
-    if rhythm_result and articulation_result and vad_result:
-        try:
-            from services.derived_indices import calculate_derived_indices
-            derived_indices = calculate_derived_indices(
-                acoustic_result=acoustic,
-                vad_result=vad_result,
-                rhythm_analysis=rhythm_result,
-                articulation_analysis=articulation_result,
-                audio_quality_usable=audio_quality.usable,
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            derived_indices = None
+    try:
+        derived_indices = calculate_derived_indices(
+            acoustic_result=acoustic,
+            vad_result=vad_result,
+            rhythm_analysis=rhythm_result,
+            articulation_analysis=articulation_result,
+            audio_quality_usable=audio_quality.usable,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        derived_indices = None
 
     # Milestone 3: Collect evidence
     evidence_collection = EvidenceCollection()
@@ -241,21 +253,25 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
     # Milestone 3: Map enhanced acoustic metrics to RawAcousticMetrics
     raw_acoustic = acoustic.raw.model_copy()
     if acoustic.pitch_contour:
-        raw_acoustic = raw_acoustic.model_copy(
-            update={
-                "pitch_mean_hz": acoustic.pitch_contour.get("pitch_mean_hz"),
-                "pitch_std_hz": acoustic.pitch_contour.get("pitch_std_hz"),
-                "pitch_slope": acoustic.pitch_contour.get("pitch_slope"),
-                "pitch_stability": acoustic.pitch_contour.get("pitch_stability"),
-                "pitch_dynamics": acoustic.pitch_contour.get("pitch_dynamics"),
-                "pitch_resets": acoustic.pitch_contour.get("pitch_resets"),
-                "terminal_slope": acoustic.pitch_contour.get("terminal_slope"),
-                "terminal_rising": acoustic.pitch_contour.get("terminal_rising"),
-                "terminal_falling": acoustic.pitch_contour.get("terminal_falling"),
-                "terminal_rising_ratio": acoustic.pitch_contour.get("terminal_rising_ratio"),
-                "terminal_falling_ratio": acoustic.pitch_contour.get("terminal_falling_ratio"),
-            }
-        )
+        pitch_updates = {
+            key: acoustic.pitch_contour.get(key)
+            for key in (
+                "pitch_mean_hz",
+                "pitch_std_hz",
+                "pitch_slope",
+                "pitch_stability",
+                "pitch_dynamics",
+                "pitch_resets",
+                "terminal_slope",
+                "terminal_rising",
+                "terminal_falling",
+                "terminal_rising_ratio",
+                "terminal_falling_ratio",
+            )
+            if key in acoustic.pitch_contour
+        }
+        if pitch_updates:
+            raw_acoustic = raw_acoustic.model_copy(update=pitch_updates)
     if acoustic.energy_contour:
         raw_acoustic = raw_acoustic.model_copy(
             update={
@@ -425,6 +441,8 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
     recommendations = build_recommendations(feedback, delivery_metrics)
     drills = build_drills(feedback, delivery_metrics, scoring.dimension_map)
 
+    metric_evidence_payload = serialize_evidence_collection(evidence_collection)
+
     return AuthorityV2Response(
         request=RequestMetadata(
             scenario=_map_scenario(request.context),
@@ -447,6 +465,7 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         ),
         perception_profile=perception,
         evidence=evidence,
+        metric_evidence=MetricEvidenceBundle.model_validate(metric_evidence_payload),
         moments=moments,
         recommendations=recommendations,
         drills=drills,

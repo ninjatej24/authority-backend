@@ -226,23 +226,37 @@ def test_analyze_returns_milestone3_metrics(
     assert response.status_code == 200
     payload = response.json()
 
-    # Check that Milestone 3 metric categories exist
-    assert "metrics" in payload
-    assert "rhythm" in payload["metrics"]
-    assert "articulation" in payload["metrics"]
-    assert "vad" in payload["metrics"]
+    metrics = payload["metrics"]
+    assert metrics["rhythm"]["words_per_minute"] is not None
+    assert metrics["rhythm"]["words_per_minute"] > 0
+    assert metrics["rhythm"]["rhythm_consistency"] is not None
+    assert 0.0 <= metrics["rhythm"]["rhythm_consistency"] <= 1.0
 
-    # Check that raw_acoustic has Milestone 3 enhanced fields
-    raw_acoustic = payload["metrics"]["raw_acoustic"]
-    # Some enhanced fields may be null due to audio quality, but they should exist in the schema
-    assert "pitch_mean_hz" in raw_acoustic
-    assert "energy_mean" in raw_acoustic
-    assert "voicing_ratio" in raw_acoustic
+    assert metrics["articulation"]["articulation_rate"] is not None
+    assert metrics["articulation"]["articulation_rate"] > 0
+    assert metrics["articulation"]["clarity_proxy"] is not None
+    assert 0.0 <= metrics["articulation"]["clarity_proxy"] <= 1.0
 
-    # Check that derived metrics has Milestone 3 indices
-    derived = payload["metrics"]["derived"]
-    assert "vocal_command_index" in derived
-    assert "composure_index" in derived
-    assert "rhythm_index" in derived
-    assert "projection_index" in derived
-    assert "authority_signal_index" in derived
+    assert metrics["vad"]["speech_ratio"] is not None
+    assert metrics["vad"]["speech_ratio"] > 0
+    assert metrics["vad"]["total_speech_duration_ms"] is not None
+    assert metrics["vad"]["total_speech_duration_ms"] > 0
+
+    derived = metrics["derived"]
+    for key in (
+        "vocal_command_index",
+        "composure_index",
+        "rhythm_index",
+        "projection_index",
+        "authority_signal_index",
+    ):
+        assert derived[key] is not None, f"{key} should be populated for valid speech input"
+        assert 0.0 <= derived[key] <= 1.0
+
+    raw_acoustic = metrics["raw_acoustic"]
+    assert raw_acoustic.get("pitch_mean_hz") is not None
+    assert raw_acoustic.get("energy_mean") is not None
+
+    assert "metric_evidence" in payload
+    assert len(payload["metric_evidence"]["vad"]) > 0
+    assert len(payload["metric_evidence"]["rhythm"]) > 0

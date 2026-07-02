@@ -270,6 +270,30 @@ class EvidenceItem(BaseModel):
     signals: list[str]
 
 
+class MetricEvidenceItem(BaseModel):
+    metric_name: str
+    value: float | int | str | bool | None = None
+    confidence: float
+    source: str
+    calculation_method: str
+    window_used: list[int] | None = None
+    raw_inputs: dict = Field(default_factory=dict)
+    timestamp: str | None = None
+    notes: str = ""
+
+
+class MetricEvidenceBundle(BaseModel):
+    audio_quality: list[MetricEvidenceItem] = Field(default_factory=list)
+    pitch_contour: list[MetricEvidenceItem] = Field(default_factory=list)
+    energy_contour: list[MetricEvidenceItem] = Field(default_factory=list)
+    voice_quality: list[MetricEvidenceItem] = Field(default_factory=list)
+    rhythm: list[MetricEvidenceItem] = Field(default_factory=list)
+    articulation: list[MetricEvidenceItem] = Field(default_factory=list)
+    vad: list[MetricEvidenceItem] = Field(default_factory=list)
+    derived_indices: list[MetricEvidenceItem] = Field(default_factory=list)
+    window_features: list[MetricEvidenceItem] = Field(default_factory=list)
+
+
 class Moment(BaseModel):
     moment_id: str
     type: str
@@ -372,6 +396,7 @@ class AuthorityV2Response(BaseModel):
     metrics: Metrics
     perception_profile: PerceptionProfile
     evidence: list[EvidenceItem]
+    metric_evidence: MetricEvidenceBundle = Field(default_factory=MetricEvidenceBundle)
     moments: list[Moment]
     recommendations: Recommendations
     drills: list[Drill]

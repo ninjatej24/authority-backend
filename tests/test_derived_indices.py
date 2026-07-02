@@ -227,10 +227,69 @@ def test_derived_indices_with_poor_audio():
         audio_quality_usable=False,
         duration_ms=10000,
     )
-    
+
+    assert result is not None
     assert isinstance(result, DerivedIndices)
-    # Poor audio should reduce confidence
     assert result.confidence < 1.0
+
+
+def test_derived_indices_returns_none_for_silent_unusable_audio():
+    """Silent unusable recordings should not fabricate derived indices."""
+    voice_metrics: VoiceMetrics = {
+        "duration_seconds": 0.5,
+        "pitch_mean": 0.0,
+        "pitch_median": 0.0,
+        "pitch_variation": 0.0,
+        "energy_mean": 0.0,
+        "energy_variation": 0.0,
+        "silence_ratio": 1.0,
+        "avg_pause_duration": 0.0,
+        "pause_frequency": 0.0,
+        "speech_density": 0.0,
+        "longest_pause_seconds": 0.0,
+        "pause_count": 0.0,
+        "mid_phrase_pause_rate": 0.0,
+        "terminal_rise_ratio": 0.0,
+        "f0_range_semitones": 0.0,
+        "f0_variability_semitones": 0.0,
+    }
+
+    acoustic_result = AcousticAnalysisResult(
+        voice_metrics=voice_metrics,
+        raw=None,  # type: ignore
+        derived=None,  # type: ignore
+        windows=[],
+        speaking_seconds=0.0,
+        pitch_contour={},
+        energy_contour={},
+        voice_quality={"voicing_ratio": 0.0},
+    )
+
+    vad_result = VADResult(
+        segments=[],
+        speech_segments=[],
+        silence_segments=[],
+        speech_ratio=0.0,
+        total_speech_duration_ms=0,
+        total_silence_duration_ms=500,
+        pause_durations_ms=[],
+        long_pauses_ms=[],
+        mid_sentence_pauses_ms=[],
+        end_of_sentence_pauses_ms=[],
+        avg_pause_duration_ms=0.0,
+        pause_frequency_per_minute=0.0,
+    )
+
+    result = calculate_derived_indices(
+        acoustic_result=acoustic_result,
+        vad_result=vad_result,
+        rhythm_analysis=None,
+        articulation_analysis=None,
+        audio_quality_usable=False,
+        duration_ms=500,
+    )
+
+    assert result is None
 
 
 def test_derived_indices_structure():

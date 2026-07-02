@@ -50,12 +50,4 @@ async def analyze_voice(
     )
 
     response = run_analysis(_get_client(), request)
-
-    print("\n===== DEBUG =====")
-    print("Context:", context)
-    print("Title:", title)
-    print("Authority Score:", response.scores.authority_score)
-    print("Schema:", response.schema_version)
-    print("=================\n")
-
     return response.model_dump()

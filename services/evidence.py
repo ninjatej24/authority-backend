@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
@@ -22,8 +22,9 @@ class MetricSource(Enum):
 
 class ConfidenceLevel(Enum):
     """Confidence level for metric reliability."""
+
     HIGH = "high"
-    MEDIUM = "high"
+    MEDIUM = "medium"
     LOW = "low"
     UNKNOWN = "unknown"
 
@@ -38,7 +39,9 @@ class MetricEvidence:
     calculation_method: str
     window_used: tuple[int, int] | None = None  # (start_ms, end_ms) if windowed
     raw_inputs: dict[str, Any] = field(default_factory=dict)
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     notes: str = ""
 
 
@@ -312,6 +315,38 @@ def calculate_overall_confidence(collection: EvidenceCollection) -> float:
     all_evidence = collection.all_evidence()
     if not all_evidence:
         return 0.5
-    
+
     confidences = [e.confidence for e in all_evidence]
     return round(sum(confidences) / len(confidences), 2)
+
+
+def serialize_evidence_collection(collection: EvidenceCollection) -> dict[str, list[dict]]:
+    """Serialize Milestone 3 metric evidence for API responses."""
+
+    def _serialize_items(items: list[MetricEvidence]) -> list[dict]:
+        return [
+            {
+                "metric_name": item.metric_name,
+                "value": item.value,
+                "confidence": item.confidence,
+                "source": item.source.value if isinstance(item.source, MetricSource) else item.source,
+                "calculation_method": item.calculation_method,
+                "window_used": list(item.window_used) if item.window_used else None,
+                "raw_inputs": item.raw_inputs,
+                "timestamp": item.timestamp,
+                "notes": item.notes,
+            }
+            for item in items
+        ]
+
+    return {
+        "audio_quality": _serialize_items(collection.audio_quality),
+        "pitch_contour": _serialize_items(collection.pitch_contour),
+        "energy_contour": _serialize_items(collection.energy_contour),
+        "voice_quality": _serialize_items(collection.voice_quality),
+        "rhythm": _serialize_items(collection.rhythm),
+        "articulation": _serialize_items(collection.articulation),
+        "vad": _serialize_items(collection.vad),
+        "derived_indices": _serialize_items(collection.derived_indices),
+        "window_features": _serialize_items(collection.window_features),
+    }
