@@ -101,18 +101,23 @@ def client():
     return TestClient(app)
 
 
-@patch("services.coaching_engine.client.chat.completions.create")
-@patch("services.inference_engine.client.chat.completions.create")
-@patch("main.client.audio.transcriptions.create")
+@patch("services.coaching_engine._get_client")
+@patch("services.inference_engine._get_client")
+@patch("main._get_client")
 def test_analyze_short_silent_file_returns_safe_response(
-    mock_transcribe,
-    mock_cognition,
-    mock_feedback,
+    mock_main_get_client,
+    mock_inference_get_client,
+    mock_coaching_get_client,
     client,
     tmp_path,
 ):
-    mock_transcribe.return_value = MagicMock(text="", language="en", segments=[])
+    # Mock the OpenAI client for transcription (main)
+    mock_main_client = MagicMock()
+    mock_main_client.audio.transcriptions.create.return_value = MagicMock(text="", language="en", segments=[])
+    mock_main_get_client.return_value = mock_main_client
 
+    # Mock the OpenAI client for inference
+    mock_inference_client = MagicMock()
     cognition_response = MagicMock()
     cognition_response.choices = [
         MagicMock(
@@ -123,6 +128,11 @@ def test_analyze_short_silent_file_returns_safe_response(
             )
         )
     ]
+    mock_inference_client.chat.completions.create.return_value = cognition_response
+    mock_inference_get_client.return_value = mock_inference_client
+
+    # Mock the OpenAI client for coaching
+    mock_coaching_client = MagicMock()
     feedback_response = MagicMock()
     feedback_response.choices = [
         MagicMock(
@@ -132,8 +142,8 @@ def test_analyze_short_silent_file_returns_safe_response(
             )
         )
     ]
-    mock_cognition.return_value = cognition_response
-    mock_feedback.return_value = feedback_response
+    mock_coaching_client.chat.completions.create.return_value = feedback_response
+    mock_coaching_get_client.return_value = mock_coaching_client
 
     wav_bytes = _make_wav_bytes(duration_seconds=0.5, amplitude=0.0001)
     response = client.post(
@@ -148,13 +158,13 @@ def test_analyze_short_silent_file_returns_safe_response(
     assert model.uncertainty.reasons
 
 
-@patch("services.coaching_engine.client.chat.completions.create")
-@patch("services.inference_engine.client.chat.completions.create")
-@patch("main.client.audio.transcriptions.create")
+@patch("services.coaching_engine._get_client")
+@patch("services.inference_engine._get_client")
+@patch("main._get_client")
 def test_analyze_filler_transcript_metric(
-    mock_transcribe,
-    mock_cognition,
-    mock_feedback,
+    mock_main_get_client,
+    mock_inference_get_client,
+    mock_coaching_get_client,
     client,
 ):
     filler_text = "um uh like you know um uh like basically um"
@@ -176,9 +186,15 @@ def test_analyze_filler_transcript_metric(
                 _Word(w, i * 0.1, (i + 1) * 0.1) for i, w in enumerate(words)
             ]
 
-    mock_transcribe.return_value = MagicMock(
+    # Mock the OpenAI client for transcription (main)
+    mock_main_client = MagicMock()
+    mock_main_client.audio.transcriptions.create.return_value = MagicMock(
         text=filler_text, language="en", segments=[_Seg()]
     )
+    mock_main_get_client.return_value = mock_main_client
+
+    # Mock the OpenAI client for inference
+    mock_inference_client = MagicMock()
     cognition_response = MagicMock()
     cognition_response.choices = [
         MagicMock(
@@ -189,6 +205,11 @@ def test_analyze_filler_transcript_metric(
             )
         )
     ]
+    mock_inference_client.chat.completions.create.return_value = cognition_response
+    mock_inference_get_client.return_value = mock_inference_client
+
+    # Mock the OpenAI client for coaching
+    mock_coaching_client = MagicMock()
     feedback_response = MagicMock()
     feedback_response.choices = [
         MagicMock(
@@ -198,8 +219,8 @@ def test_analyze_filler_transcript_metric(
             )
         )
     ]
-    mock_cognition.return_value = cognition_response
-    mock_feedback.return_value = feedback_response
+    mock_coaching_client.chat.completions.create.return_value = feedback_response
+    mock_coaching_get_client.return_value = mock_coaching_client
 
     wav_bytes = _make_wav_bytes(duration_seconds=2.0)
     response = client.post(

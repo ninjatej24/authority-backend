@@ -98,23 +98,33 @@ def client():
     return TestClient(app)
 
 
-@patch("services.coaching_engine.client.chat.completions.create")
-@patch("services.inference_engine.client.chat.completions.create")
-@patch("main.client.audio.transcriptions.create")
+@patch("services.coaching_engine._get_client")
+@patch("services.inference_engine._get_client")
+@patch("main._get_client")
 def test_analyze_returns_valid_authority_v2(
-    mock_transcribe,
-    mock_cognition,
-    mock_feedback,
+    mock_main_get_client,
+    mock_inference_get_client,
+    mock_coaching_get_client,
     client,
 ):
-    mock_transcribe.return_value = _FakeTranscription()
+    # Mock the OpenAI client for transcription (main)
+    mock_main_client = MagicMock()
+    mock_main_client.audio.transcriptions.create.return_value = _FakeTranscription()
+    mock_main_get_client.return_value = mock_main_client
 
+    # Mock the OpenAI client for inference
+    mock_inference_client = MagicMock()
     cognition_response = MagicMock()
     cognition_response.choices = [MagicMock(message=MagicMock(content=_fake_gpt_json()))]
+    mock_inference_client.chat.completions.create.return_value = cognition_response
+    mock_inference_get_client.return_value = mock_inference_client
+
+    # Mock the OpenAI client for coaching
+    mock_coaching_client = MagicMock()
     feedback_response = MagicMock()
     feedback_response.choices = [MagicMock(message=MagicMock(content=_fake_feedback_json()))]
-    mock_cognition.return_value = cognition_response
-    mock_feedback.return_value = feedback_response
+    mock_coaching_client.chat.completions.create.return_value = feedback_response
+    mock_coaching_get_client.return_value = mock_coaching_client
 
     wav_bytes = _make_wav_bytes()
     response = client.post(
@@ -137,22 +147,33 @@ def test_analyze_returns_valid_authority_v2(
     assert model.safety.responsible_framing
 
 
-@patch("services.coaching_engine.client.chat.completions.create")
-@patch("services.inference_engine.client.chat.completions.create")
-@patch("main.client.audio.transcriptions.create")
+@patch("services.coaching_engine._get_client")
+@patch("services.inference_engine._get_client")
+@patch("main._get_client")
 def test_analyze_impromptu_scenario_mapping(
-    mock_transcribe,
-    mock_cognition,
-    mock_feedback,
+    mock_main_get_client,
+    mock_inference_get_client,
+    mock_coaching_get_client,
     client,
 ):
-    mock_transcribe.return_value = _FakeTranscription()
+    # Mock the OpenAI client for transcription (main)
+    mock_main_client = MagicMock()
+    mock_main_client.audio.transcriptions.create.return_value = _FakeTranscription()
+    mock_main_get_client.return_value = mock_main_client
+    
+    # Mock the OpenAI client for inference
+    mock_inference_client = MagicMock()
     cognition_response = MagicMock()
     cognition_response.choices = [MagicMock(message=MagicMock(content=_fake_gpt_json()))]
+    mock_inference_client.chat.completions.create.return_value = cognition_response
+    mock_inference_get_client.return_value = mock_inference_client
+    
+    # Mock the OpenAI client for coaching
+    mock_coaching_client = MagicMock()
     feedback_response = MagicMock()
     feedback_response.choices = [MagicMock(message=MagicMock(content=_fake_feedback_json()))]
-    mock_cognition.return_value = cognition_response
-    mock_feedback.return_value = feedback_response
+    mock_coaching_client.chat.completions.create.return_value = feedback_response
+    mock_coaching_get_client.return_value = mock_coaching_client
 
     wav_bytes = _make_wav_bytes()
     response = client.post(
@@ -164,3 +185,64 @@ def test_analyze_impromptu_scenario_mapping(
     assert response.status_code == 200
     payload = response.json()
     assert payload["request"]["scenario"] == "impromptu"
+
+
+@patch("services.coaching_engine._get_client")
+@patch("services.inference_engine._get_client")
+@patch("main._get_client")
+def test_analyze_returns_milestone3_metrics(
+    mock_main_get_client,
+    mock_inference_get_client,
+    mock_coaching_get_client,
+    client,
+):
+    """Test that /analyze returns populated Milestone 3 metrics."""
+    # Mock the OpenAI client for transcription (main)
+    mock_main_client = MagicMock()
+    mock_main_client.audio.transcriptions.create.return_value = _FakeTranscription()
+    mock_main_get_client.return_value = mock_main_client
+
+    # Mock the OpenAI client for inference
+    mock_inference_client = MagicMock()
+    cognition_response = MagicMock()
+    cognition_response.choices = [MagicMock(message=MagicMock(content=_fake_gpt_json()))]
+    mock_inference_client.chat.completions.create.return_value = cognition_response
+    mock_inference_get_client.return_value = mock_inference_client
+
+    # Mock the OpenAI client for coaching
+    mock_coaching_client = MagicMock()
+    feedback_response = MagicMock()
+    feedback_response.choices = [MagicMock(message=MagicMock(content=_fake_feedback_json()))]
+    mock_coaching_client.chat.completions.create.return_value = feedback_response
+    mock_coaching_get_client.return_value = mock_coaching_client
+
+    wav_bytes = _make_wav_bytes(duration_seconds=5.0)  # Longer audio for better analysis
+    response = client.post(
+        "/analyze",
+        files={"file": ("sample.wav", wav_bytes, "audio/wav")},
+        data={"context": "initial", "title": "Test", "prompt": "Tell me about leadership"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    # Check that Milestone 3 metric categories exist
+    assert "metrics" in payload
+    assert "rhythm" in payload["metrics"]
+    assert "articulation" in payload["metrics"]
+    assert "vad" in payload["metrics"]
+
+    # Check that raw_acoustic has Milestone 3 enhanced fields
+    raw_acoustic = payload["metrics"]["raw_acoustic"]
+    # Some enhanced fields may be null due to audio quality, but they should exist in the schema
+    assert "pitch_mean_hz" in raw_acoustic
+    assert "energy_mean" in raw_acoustic
+    assert "voicing_ratio" in raw_acoustic
+
+    # Check that derived metrics has Milestone 3 indices
+    derived = payload["metrics"]["derived"]
+    assert "vocal_command_index" in derived
+    assert "composure_index" in derived
+    assert "rhythm_index" in derived
+    assert "projection_index" in derived
+    assert "authority_signal_index" in derived

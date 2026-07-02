@@ -19,7 +19,10 @@ from schemas import (
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def _get_client() -> OpenAI:
+    """Lazy-create OpenAI client only when needed."""
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def _clamp_score(value, default=50) -> int:
@@ -132,6 +135,7 @@ Transcript:
 {transcript}
 """
 
+    client = _get_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0,

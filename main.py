@@ -12,7 +12,13 @@ from openai import OpenAI
 from services.response_builder import AnalyzeRequest, run_analysis
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def _get_client() -> OpenAI:
+    """Lazy-create OpenAI client only when needed."""
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
 app = FastAPI()
 
 
@@ -43,7 +49,7 @@ async def analyze_voice(
         skill=skill,
     )
 
-    response = run_analysis(client, request)
+    response = run_analysis(_get_client(), request)
 
     print("\n===== DEBUG =====")
     print("Context:", context)

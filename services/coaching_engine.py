@@ -12,7 +12,10 @@ from schemas import Drill, Recommendations
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def _get_client() -> OpenAI:
+    """Lazy-create OpenAI client only when needed."""
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def _safe_parse(content: str) -> dict | None:
@@ -111,6 +114,7 @@ Return ONLY JSON:
 }}
 """
 
+    client = _get_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.2,
