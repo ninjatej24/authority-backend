@@ -207,6 +207,7 @@ class VADMetrics(BaseModel):
     end_of_sentence_pauses_ms: list[float] = Field(default_factory=list)
     avg_pause_duration_ms: float | None = None
     pause_frequency_per_minute: float | None = None
+    vad_backend: str | None = None
 
 
 class DerivedMetrics(BaseModel):

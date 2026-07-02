@@ -156,7 +156,20 @@ def test_analyze_short_silent_file_returns_safe_response(
     model = AuthorityV2Response.model_validate(response.json())
     assert model.audio_quality.usable is False
     assert model.uncertainty.reasons
-    assert model.metrics.vad.speech_ratio is not None
+    assert model.metrics.vad.speech_ratio == 0.0
+    assert model.metrics.vad.total_speech_duration_ms == 0
+    assert model.metrics.vad.total_silence_duration_ms == model.request.duration_ms
+    assert model.metrics.vad.avg_pause_duration_ms == 0.0
+    assert model.metrics.vad.pause_frequency_per_minute == 0.0
+    assert model.metrics.vad.pause_durations_ms == []
+    assert model.metrics.vad.long_pauses_ms == []
+    assert model.metrics.vad.mid_sentence_pauses_ms == []
+    assert model.metrics.vad.end_of_sentence_pauses_ms == []
+    assert model.metrics.vad.vad_backend in {"none", "empty_fallback"}
+    assert any(
+        reason in model.uncertainty.reasons
+        for reason in ("No usable speech detected", "VAD unavailable for silent audio")
+    )
     assert model.metrics.derived.vocal_command_index is None or model.metrics.derived.vocal_command_index >= 0
 
 

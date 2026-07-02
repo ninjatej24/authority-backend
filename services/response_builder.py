@@ -45,7 +45,7 @@ from services.moments import build_moments
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
 from services.transcription import transcribe_audio
-from services.vad import prepare_pcm_samples, run_vad
+from services.vad import empty_vad_result, prepare_pcm_samples, run_vad
 
 
 @dataclass
@@ -114,6 +114,22 @@ def _load_audio_samples(wav_path: str) -> tuple[np.ndarray, int]:
     return samples, int(sound.sampling_frequency)
 
 
+def _should_force_empty_vad(duration_ms: int, audio_warnings: list[str]) -> bool:
+    if duration_ms <= 0 or duration_ms < 1000:
+        return True
+
+    warning_text = " ".join(audio_warnings).lower()
+    return any(
+        marker in warning_text
+        for marker in (
+            "zero duration",
+            "could not load audio",
+            "near-silent",
+            "very low signal",
+        )
+    )
+
+
 def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response:
     """Execute the full v2 analysis pipeline."""
     preprocessed = preprocess_audio(request.file_path)
@@ -130,7 +146,7 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
     text = transcription.transcript.full_text
 
     # Milestone 3: VAD-first segmentation (runs whenever audio exists)
-    vad_result = None
+    vad_result = empty_vad_result(duration_ms, backend="none")
     if duration_ms > 0:
         try:
             raw_samples, sample_rate = _load_audio_samples(wav_path)
@@ -141,7 +157,9 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
                 transcription.transcript.words or None,
             )
         except Exception:
-            vad_result = None
+            vad_result = empty_vad_result(duration_ms, backend="empty_fallback")
+    if _should_force_empty_vad(duration_ms, audio_quality.quality_warnings):
+        vad_result = empty_vad_result(duration_ms, backend="empty_fallback")
 
     acoustic = extract_acoustic_analysis(
         wav_path,
@@ -328,19 +346,18 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         )
 
     # Milestone 3: Build VAD metrics
-    vad_metrics = VADMetrics()
-    if vad_result:
-        vad_metrics = VADMetrics(
-            speech_ratio=vad_result.speech_ratio,
-            total_speech_duration_ms=vad_result.total_speech_duration_ms,
-            total_silence_duration_ms=vad_result.total_silence_duration_ms,
-            pause_durations_ms=vad_result.pause_durations_ms,
-            long_pauses_ms=vad_result.long_pauses_ms,
-            mid_sentence_pauses_ms=vad_result.mid_sentence_pauses_ms,
-            end_of_sentence_pauses_ms=vad_result.end_of_sentence_pauses_ms,
-            avg_pause_duration_ms=vad_result.avg_pause_duration_ms,
-            pause_frequency_per_minute=vad_result.pause_frequency_per_minute,
-        )
+    vad_metrics = VADMetrics(
+        speech_ratio=vad_result.speech_ratio,
+        total_speech_duration_ms=vad_result.total_speech_duration_ms,
+        total_silence_duration_ms=vad_result.total_silence_duration_ms,
+        pause_durations_ms=vad_result.pause_durations_ms,
+        long_pauses_ms=vad_result.long_pauses_ms,
+        mid_sentence_pauses_ms=vad_result.mid_sentence_pauses_ms,
+        end_of_sentence_pauses_ms=vad_result.end_of_sentence_pauses_ms,
+        avg_pause_duration_ms=vad_result.avg_pause_duration_ms,
+        pause_frequency_per_minute=vad_result.pause_frequency_per_minute,
+        vad_backend=vad_result.vad_backend,
+    )
 
     # Milestone 3: Update derived metrics with derived indices
     if derived_indices:
@@ -425,6 +442,14 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         audio_warnings=audio_quality.quality_warnings,
         missing_metrics=_missing_metric_names(acoustic),
     )
+    if vad_result.total_speech_duration_ms <= 0:
+        reason = (
+            "VAD unavailable for silent audio"
+            if vad_result.vad_backend == "none"
+            else "No usable speech detected"
+        )
+        if reason not in uncertainty.reasons:
+            uncertainty.reasons.append(reason)
 
     scores = scoring.scores.model_copy(
         update={

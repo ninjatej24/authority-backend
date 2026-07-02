@@ -47,8 +47,16 @@ def test_vad_with_silence():
     result = run_vad(samples, 16000)
     
     assert isinstance(result, VADResult)
-    assert result.speech_ratio < 0.5  # Should detect mostly silence
-    assert result.total_speech_duration_ms < result.total_silence_duration_ms
+    assert result.speech_ratio == 0.0
+    assert result.total_speech_duration_ms == 0
+    assert result.total_silence_duration_ms == 1000
+    assert result.pause_durations_ms == []
+    assert result.long_pauses_ms == []
+    assert result.mid_sentence_pauses_ms == []
+    assert result.end_of_sentence_pauses_ms == []
+    assert result.avg_pause_duration_ms == 0.0
+    assert result.pause_frequency_per_minute == 0.0
+    assert result.vad_backend == "empty_fallback"
 
 
 def test_vad_empty_samples():
@@ -60,6 +68,9 @@ def test_vad_empty_samples():
     assert isinstance(result, VADResult)
     assert result.speech_ratio == 0.0
     assert result.total_speech_duration_ms == 0
+    assert result.total_silence_duration_ms == 0
+    assert result.pause_durations_ms == []
+    assert result.vad_backend == "none"
     assert len(result.speech_segments) == 0
 
 

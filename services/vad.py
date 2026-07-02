@@ -57,7 +57,8 @@ class VADResult:
     vad_backend: str = "unknown"
 
 
-def _empty_vad_result(total_duration_ms: int = 0, backend: str = "empty") -> VADResult:
+def empty_vad_result(total_duration_ms: int = 0, backend: str = "empty_fallback") -> VADResult:
+    total_duration_ms = max(int(total_duration_ms), 0)
     return VADResult(
         segments=[],
         speech_segments=[],
@@ -73,6 +74,10 @@ def _empty_vad_result(total_duration_ms: int = 0, backend: str = "empty") -> VAD
         pause_frequency_per_minute=0.0,
         vad_backend=backend,
     )
+
+
+def _empty_vad_result(total_duration_ms: int = 0, backend: str = "empty_fallback") -> VADResult:
+    return empty_vad_result(total_duration_ms, backend)
 
 
 def _resample_int16(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -269,6 +274,10 @@ def _build_complete_timeline(
     last_end = 0
 
     for start, end, is_speech in sorted(speech_segments, key=lambda x: x[0]):
+        start = max(0, min(start, total_duration_ms))
+        end = max(start, min(end, total_duration_ms))
+        if end <= start:
+            continue
         if start > last_end:
             timeline.append((last_end, start, False))
         timeline.append((start, end, True))
@@ -396,11 +405,13 @@ def run_vad(
     Returns:
         VADResult with complete segmentation and pause analysis
     """
-    if len(samples) == 0:
-        return _empty_vad_result()
+    if len(samples) == 0 or sample_rate <= 0:
+        return _empty_vad_result(backend="none")
 
     pcm, sample_rate = prepare_pcm_samples(samples, sample_rate)
     total_duration_ms = int(len(pcm) / sample_rate * 1000)
+    if total_duration_ms <= 0:
+        return _empty_vad_result(total_duration_ms, backend="none")
 
     if WEBRTC_VAD_AVAILABLE:
         try:
@@ -416,6 +427,9 @@ def run_vad(
 
     merged_speech = _merge_adjacent_segments(raw_speech_segments)
     speech_segments = _filter_short_segments(merged_speech, MIN_SPEECH_DURATION_MS)
+    if not speech_segments:
+        return _empty_vad_result(total_duration_ms, backend="empty_fallback")
+
     timeline = _build_complete_timeline(speech_segments, total_duration_ms)
 
     return _finalize_vad_result(timeline, total_duration_ms, transcript_words, backend)
