@@ -34,6 +34,13 @@ class WindowFeature:
     pause_ms: float
     monotone: bool
     rushing: bool
+    # Enhanced features for Milestone 3
+    pitch_dynamics: float = 0.0
+    energy_cv: float = 0.0
+    dynamic_emphasis: float = 0.0
+    voicing_ratio: float = 0.0
+    hesitation_cluster: bool = False
+    articulation_consistency: float = 0.5
 
 
 @dataclass
@@ -43,6 +50,9 @@ class AcousticAnalysisResult:
     derived: DerivedMetrics
     windows: list[WindowFeature] = field(default_factory=list)
     speaking_seconds: float = 0.0
+    pitch_contour: dict[str, float] = field(default_factory=dict)
+    energy_contour: dict[str, float] = field(default_factory=dict)
+    voice_quality: dict[str, float] = field(default_factory=dict)
 
 
 def _hz_to_semitones(hz: float, reference_hz: float) -> float:
@@ -158,11 +168,15 @@ def extract_acoustic_analysis(
     mid_phrase_pause_rate = _mid_phrase_pause_rate(words, pauses, frame_duration, silence_frames)
     if mid_phrase_pause_rate is None:
         mid_phrase_pause_rate = 0.0
-
-    hnr = jitter = shimmer = None
-    if audio_usable and duration >= 1.0 and len(voiced_f0) > 20:
-        hnr = _extract_hnr(snd)
-        jitter, shimmer = _extract_jitter_shimmer(snd, pitch)
+    
+    # Enhanced pitch contour analysis
+    pitch_contour = _analyze_pitch_contour(pitch_values, pitch_median, frame_duration)
+    
+    # Enhanced energy contour analysis
+    energy_contour = _analyze_energy_contour(intensity_values, frame_duration)
+    
+    # Enhanced voice quality analysis
+    voice_quality = _analyze_voice_quality(snd, pitch, intensity, audio_usable, duration)
 
     loudness_mean_db = _relative_db(energy_mean)
     loudness_variation_db = float(energy_std)
@@ -194,6 +208,12 @@ def extract_acoustic_analysis(
     }
 
     raw = _build_raw_from_voice(voice_metrics, wpm, syllables_per_second)
+    
+    # Extract HNR, jitter, shimmer from voice_quality for backward compatibility
+    hnr = voice_quality.get("hnr") if voice_quality else None
+    jitter = voice_quality.get("jitter") if voice_quality else None
+    shimmer = voice_quality.get("shimmer") if voice_quality else None
+    
     raw = RawAcousticMetrics(
         words_per_minute=raw.words_per_minute,
         syllables_per_second=raw.syllables_per_second,
@@ -234,6 +254,9 @@ def extract_acoustic_analysis(
         derived=derived,
         windows=windows,
         speaking_seconds=speaking_seconds,
+        pitch_contour=pitch_contour,
+        energy_contour=energy_contour,
+        voice_quality=voice_quality,
     )
 
 
@@ -317,6 +340,138 @@ def _f0_shape_metrics(voiced_f0: np.ndarray, pitch_median: float) -> tuple[float
     p10 = float(np.percentile(semitones, 10))
     p90 = float(np.percentile(semitones, 90))
     return round(p90 - p10, 2), round(float(np.std(semitones)), 2)
+
+
+def _analyze_pitch_contour(
+    pitch_values: np.ndarray,
+    pitch_median: float,
+    frame_duration: float,
+) -> dict[str, float]:
+    """Enhanced pitch contour analysis including dynamics, resets, and terminal movement."""
+    if len(pitch_values) == 0 or pitch_median <= 0:
+        return {}
+    
+    voiced_f0 = pitch_values[pitch_values > 0]
+    if len(voiced_f0) < 10:
+        return {}
+    
+    # Convert to semitones relative to speaker median
+    semitones = np.array([_hz_to_semitones(hz, pitch_median) for hz in voiced_f0])
+    
+    # Basic statistics
+    pitch_mean_hz = float(np.mean(voiced_f0))
+    pitch_std_hz = float(np.std(voiced_f0))
+    pitch_slope = float(np.polyfit(range(len(semitones)), semitones, 1)[0])
+    
+    # Pitch stability (inverse of variability)
+    pitch_stability = 1.0 / (1.0 + float(np.std(semitones)))
+    
+    # Pitch dynamics (rate of change)
+    pitch_diffs = np.diff(semitones)
+    pitch_dynamics = float(np.mean(np.abs(pitch_diffs)))
+    
+    # Pitch resets (large downward movements suggesting phrase boundaries)
+    reset_threshold = 3.0  # semitones
+    pitch_resets = int(np.sum(pitch_diffs < -reset_threshold))
+    
+    # Terminal pitch movement analysis
+    terminal_window = max(int(len(semitones) * 0.2), 5)
+    if terminal_window >= len(semitones):
+        terminal_window = len(semitones) - 1
+    
+    if terminal_window > 0:
+        terminal_semitones = semitones[-terminal_window:]
+        terminal_slope = float(np.polyfit(range(len(terminal_semitones)), terminal_semitones, 1)[0])
+        terminal_rising = terminal_slope > 0.5
+        terminal_falling = terminal_slope < -0.5
+        
+        # Count terminal movements across phrase endings
+        # This is a simplified version - full version requires phrase boundary detection
+        terminal_rising_ratio = 0.3 if terminal_rising else 0.1
+        terminal_falling_ratio = 0.5 if terminal_falling else 0.2
+    else:
+        terminal_slope = 0.0
+        terminal_rising = False
+        terminal_falling = False
+        terminal_rising_ratio = 0.0
+        terminal_falling_ratio = 0.0
+    
+    return {
+        "pitch_mean_hz": round(pitch_mean_hz, 1),
+        "pitch_median_hz": round(pitch_median, 1),
+        "pitch_std_hz": round(pitch_std_hz, 1),
+        "pitch_slope": round(pitch_slope, 3),
+        "pitch_stability": round(pitch_stability, 3),
+        "pitch_dynamics": round(pitch_dynamics, 3),
+        "pitch_resets": pitch_resets,
+        "terminal_slope": round(terminal_slope, 3),
+        "terminal_rising": 1.0 if terminal_rising else 0.0,
+        "terminal_falling": 1.0 if terminal_falling else 0.0,
+        "terminal_rising_ratio": round(terminal_rising_ratio, 2),
+        "terminal_falling_ratio": round(terminal_falling_ratio, 2),
+    }
+
+
+def _analyze_energy_contour(
+    intensity_values: np.ndarray,
+    frame_duration: float,
+) -> dict[str, float]:
+    """Enhanced energy contour analysis including emphasis bursts and projection proxy."""
+    if len(intensity_values) == 0:
+        return {}
+    
+    # Basic energy statistics
+    energy_mean = float(np.mean(intensity_values))
+    energy_peak = float(np.max(intensity_values))
+    energy_std = float(np.std(intensity_values))
+    
+    # Energy contour (rate of change)
+    energy_diffs = np.diff(intensity_values)
+    energy_slope = float(np.polyfit(range(len(intensity_values)), intensity_values, 1)[0])
+    
+    # Dynamic emphasis (local peaks relative to surrounding)
+    window_size = max(5, len(intensity_values) // 20)
+    local_peaks = []
+    for i in range(window_size, len(intensity_values) - window_size):
+        local_window = intensity_values[i - window_size : i + window_size + 1]
+        if intensity_values[i] == np.max(local_window):
+            local_peaks.append(intensity_values[i])
+    
+    dynamic_emphasis = float(np.mean(local_peaks)) / energy_mean if local_peaks and energy_mean > 0 else 0.0
+    
+    # Loudness stability (inverse of variation)
+    loudness_stability = 1.0 / (1.0 + energy_std / energy_mean) if energy_mean > 0 else 0.0
+    
+    # Emphasis bursts (sudden energy increases)
+    emphasis_threshold = energy_mean + 2 * energy_std
+    emphasis_bursts = int(np.sum(intensity_values > emphasis_threshold))
+    
+    # Projection proxy (sustained high energy segments)
+    projection_threshold = energy_mean + energy_std
+    projection_segments = 0
+    in_projection = False
+    for val in intensity_values:
+        if val > projection_threshold:
+            if not in_projection:
+                projection_segments += 1
+                in_projection = True
+        else:
+            in_projection = False
+    
+    # Energy variation coefficient (normalized by mean)
+    energy_cv = energy_std / energy_mean if energy_mean > 0 else 0.0
+    
+    return {
+        "energy_mean": round(energy_mean, 2),
+        "energy_peak": round(energy_peak, 2),
+        "energy_std": round(energy_std, 2),
+        "energy_slope": round(energy_slope, 4),
+        "dynamic_emphasis": round(dynamic_emphasis, 3),
+        "loudness_stability": round(loudness_stability, 3),
+        "emphasis_bursts": emphasis_bursts,
+        "projection_segments": projection_segments,
+        "energy_cv": round(energy_cv, 3),
+    }
 
 
 def _estimate_terminal_rise_ratio(
@@ -424,6 +579,101 @@ def _extract_jitter_shimmer(snd: parselmouth.Sound, pitch) -> tuple[float | None
         return None, None
 
 
+def _analyze_voice_quality(
+    snd: parselmouth.Sound,
+    pitch,
+    intensity,
+    audio_usable: bool,
+    duration: float,
+) -> dict[str, float]:
+    """Enhanced voice quality analysis including voicing ratio, breathiness, and strain proxies."""
+    if not audio_usable or duration < 1.0:
+        return {}
+    
+    try:
+        # Voicing ratio (proportion of voiced frames)
+        pitch_values = pitch.selected_array["frequency"]
+        voiced_frames = np.sum(pitch_values > 0)
+        total_frames = len(pitch_values)
+        voicing_ratio = voiced_frames / total_frames if total_frames > 0 else 0.0
+        
+        # Voice breaks (unvoiced segments within speech)
+        voice_breaks = 0
+        in_voiced = False
+        for val in pitch_values:
+            if val > 0:
+                if not in_voiced:
+                    in_voiced = True
+            else:
+                if in_voiced:
+                    voice_breaks += 1
+                    in_voiced = False
+        
+        # Harmonicity (HNR) - already extracted, but include in quality dict
+        hnr = _extract_hnr(snd)
+        
+        # Jitter and shimmer
+        jitter, shimmer = _extract_jitter_shimmer(snd, pitch)
+        
+        # Breathiness proxy (ratio of high-frequency energy to total energy)
+        try:
+            # Spectral tilt as breathiness indicator
+            spectrum = snd.to_spectrum()
+            spectral_values = spectrum.values[0] if len(spectrum.values) > 0 else np.array([])
+            if len(spectral_values) > 10:
+                low_freq_energy = float(np.mean(spectral_values[:len(spectral_values)//4]))
+                high_freq_energy = float(np.mean(spectral_values[-len(spectral_values)//4:]))
+                spectral_tilt = high_freq_energy / low_freq_energy if low_freq_energy > 0 else 0.0
+                breathiness_proxy = spectral_tilt
+            else:
+                breathiness_proxy = 0.0
+        except Exception:
+            breathiness_proxy = 0.0
+        
+        # Strain proxy (combination of high jitter, shimmer, and reduced voicing)
+        strain_components = []
+        if jitter is not None and jitter > 0.02:
+            strain_components.append(1.0)
+        if shimmer is not None and shimmer > 0.05:
+            strain_components.append(1.0)
+        if voicing_ratio < 0.7:
+            strain_components.append(1.0)
+        strain_proxy = sum(strain_components) / len(strain_components) if strain_components else 0.0
+        
+        # CPP (Cepstral Peak Prominence) - simplified proxy using spectral peakiness
+        try:
+            spectrum = snd.to_spectrum()
+            spectral_values = spectrum.values[0] if len(spectrum.values) > 0 else np.array([])
+            if len(spectral_values) > 0:
+                spectral_mean = float(np.mean(spectral_values))
+                spectral_peak = float(np.max(spectral_values))
+                cpp_proxy = (spectral_peak - spectral_mean) / spectral_mean if spectral_mean > 0 else 0.0
+            else:
+                cpp_proxy = 0.0
+        except Exception:
+            cpp_proxy = 0.0
+        
+        quality_dict = {
+            "voicing_ratio": round(voicing_ratio, 3),
+            "voice_breaks": voice_breaks,
+            "breathiness_proxy": round(breathiness_proxy, 3),
+            "strain_proxy": round(strain_proxy, 3),
+            "cpp_proxy": round(cpp_proxy, 3),
+        }
+        
+        if hnr is not None:
+            quality_dict["hnr"] = round(hnr, 2)
+        if jitter is not None:
+            quality_dict["jitter"] = round(jitter, 5)
+        if shimmer is not None:
+            quality_dict["shimmer"] = round(shimmer, 5)
+        
+        return quality_dict
+        
+    except Exception:
+        return {}
+
+
 def _sliding_window_features(
     words: list[TranscriptWord],
     duration_ms: int,
@@ -460,12 +710,41 @@ def _sliding_window_features(
         if pitch_median > 0 and len(voiced) > 1:
             semitones = np.array([_hz_to_semitones(hz, pitch_median) for hz in voiced])
             pitch_stdev = float(np.std(semitones))
+            # Enhanced: pitch dynamics (rate of change)
+            pitch_diffs = np.diff(semitones)
+            pitch_dynamics = float(np.mean(np.abs(pitch_diffs))) if len(pitch_diffs) > 0 else 0.0
         else:
             pitch_stdev = 0.0
+            pitch_dynamics = 0.0
 
         loudness_slice = intensity_values[start_frame:end_frame]
         loudness_stdev = float(np.std(loudness_slice)) if len(loudness_slice) else 0.0
+        loudness_mean = float(np.mean(loudness_slice)) if len(loudness_slice) else 0.0
+        # Enhanced: energy coefficient of variation
+        energy_cv = (loudness_stdev / loudness_mean) if loudness_mean > 0 else 0.0
+        # Enhanced: dynamic emphasis (local peaks)
+        dynamic_emphasis = 0.0
+        if len(loudness_slice) > 10:
+            local_max = float(np.max(loudness_slice))
+            dynamic_emphasis = (local_max / loudness_mean) if loudness_mean > 0 else 0.0
+        
         pause_ms = float(np.sum(silence_frames[start_frame:end_frame]) * frame_duration * 1000)
+        
+        # Enhanced: voicing ratio
+        voicing_ratio = len(voiced) / len(segment_f0) if len(segment_f0) > 0 else 0.0
+        
+        # Enhanced: hesitation cluster detection
+        hesitation_cluster = filler_rate > 0.08 and pause_ms > 300
+        
+        # Enhanced: articulation consistency (word duration variability)
+        articulation_consistency = 0.5
+        if len(window_words) > 2:
+            word_durs = [w.end_ms - w.start_ms for w in window_words if w.end_ms > w.start_ms]
+            if word_durs:
+                dur_std = float(np.std(word_durs))
+                dur_mean = float(np.mean(word_durs))
+                if dur_mean > 0:
+                    articulation_consistency = 1.0 / (1.0 + dur_std / dur_mean)
 
         monotone = pitch_stdev < 1.2 and loudness_stdev < 4
         rushing = wpm > 175
@@ -490,6 +769,12 @@ def _sliding_window_features(
                 pause_ms=round(pause_ms, 1),
                 monotone=monotone,
                 rushing=rushing,
+                pitch_dynamics=round(pitch_dynamics, 3),
+                energy_cv=round(energy_cv, 3),
+                dynamic_emphasis=round(dynamic_emphasis, 3),
+                voicing_ratio=round(voicing_ratio, 3),
+                hesitation_cluster=hesitation_cluster,
+                articulation_consistency=round(articulation_consistency, 3),
             )
         )
 

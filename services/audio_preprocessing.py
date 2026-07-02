@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import parselmouth
@@ -14,6 +15,7 @@ from schemas import AudioQuality
 TARGET_SAMPLE_RATE = 16000
 MIN_USABLE_DURATION_S = 1.0
 SHORT_RECORDING_S = 8.0
+TARGET_LUFS = -16.0
 
 
 @dataclass
@@ -69,11 +71,14 @@ def _processed_output_path(input_path: str) -> str:
 
 
 def _run_ffmpeg_preprocess(input_path: str, output_path: str) -> None:
-    # Trim silence at both ends, normalize to mono 16 kHz.
+    """Trim silence, normalize to mono 16 kHz, and apply loudness normalization."""
     silence_filter = (
         "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-45dB:"
         "stop_periods=1:stop_duration=0.2:stop_threshold=-45dB"
     )
+    loudness_filter = f"loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11"
+    combined_filter = f"{silence_filter},{loudness_filter}"
+    
     subprocess.run(
         [
             "ffmpeg",
@@ -81,7 +86,7 @@ def _run_ffmpeg_preprocess(input_path: str, output_path: str) -> None:
             "-i",
             input_path,
             "-af",
-            silence_filter,
+            combined_filter,
             "-ar",
             str(TARGET_SAMPLE_RATE),
             "-ac",
@@ -141,13 +146,51 @@ def _detect_clipping(samples: np.ndarray, threshold: float = 0.99) -> bool:
 
 
 def _noise_level_from_snr(snr: float | None) -> str:
+    """Classify noise level from SNR estimate."""
     if snr is None:
         return "unknown"
-    if snr >= 20:
+    if snr >= 25:
         return "low"
-    if snr >= 12:
+    if snr >= 15:
         return "medium"
     return "high"
+
+
+def _classify_recording_quality(
+    snr: float | None,
+    clipping: bool,
+    duration: float,
+    signal_level: float,
+) -> Literal["excellent", "good", "fair", "poor"]:
+    """Classify overall recording quality based on multiple factors."""
+    score = 0
+    
+    if snr is not None:
+        if snr >= 25:
+            score += 3
+        elif snr >= 15:
+            score += 2
+        elif snr >= 8:
+            score += 1
+    
+    if not clipping:
+        score += 2
+    
+    if duration >= 30:
+        score += 2
+    elif duration >= 10:
+        score += 1
+    
+    if signal_level >= 0.1:
+        score += 1
+    
+    if score >= 7:
+        return "excellent"
+    if score >= 5:
+        return "good"
+    if score >= 3:
+        return "fair"
+    return "poor"
 
 
 def _estimate_single_speaker_likelihood(samples: np.ndarray, sample_rate: int) -> float | None:
@@ -231,8 +274,13 @@ def _assess_processed_audio(wav_path: str) -> tuple[int, AudioQuality]:
     )
 
     speaker_likelihood = _estimate_single_speaker_likelihood(samples, sample_rate)
+    signal_level = float(np.max(np.abs(samples)))
+    recording_quality = _classify_recording_quality(snr, clipping, duration, signal_level)
 
-    # TODO(v2.3): LUFS normalization and room-noise classification
+    if recording_quality == "poor":
+        warnings.append("Overall recording quality is poor; metrics may be unreliable")
+    elif recording_quality == "fair":
+        warnings.append("Recording quality is fair; some metrics may have reduced accuracy")
 
     return duration_ms, AudioQuality(
         usable=usable,

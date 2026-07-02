@@ -129,6 +129,32 @@ class RawAcousticMetrics(BaseModel):
     hnr: float | None = None
     jitter_local: float | None = None
     shimmer_local: float | None = None
+    # Milestone 3 enhanced metrics
+    pitch_mean_hz: float | None = None
+    pitch_std_hz: float | None = None
+    pitch_slope: float | None = None
+    pitch_stability: float | None = None
+    pitch_dynamics: float | None = None
+    pitch_resets: int | None = None
+    terminal_slope: float | None = None
+    terminal_rising: float | None = None
+    terminal_falling: float | None = None
+    terminal_rising_ratio: float | None = None
+    terminal_falling_ratio: float | None = None
+    energy_mean: float | None = None
+    energy_peak: float | None = None
+    energy_std: float | None = None
+    energy_slope: float | None = None
+    dynamic_emphasis: float | None = None
+    loudness_stability: float | None = None
+    emphasis_bursts: int | None = None
+    projection_segments: int | None = None
+    energy_cv: float | None = None
+    voicing_ratio: float | None = None
+    voice_breaks: int | None = None
+    breathiness_proxy: float | None = None
+    strain_proxy: float | None = None
+    cpp_proxy: float | None = None
 
 
 class LinguisticMetrics(BaseModel):
@@ -147,18 +173,64 @@ class LinguisticMetrics(BaseModel):
     structure_score: float | None = None
 
 
+class RhythmMetrics(BaseModel):
+    speech_rate: float | None = None
+    words_per_minute: float | None = None
+    pause_cadence: float | None = None
+    speech_continuity: float | None = None
+    hesitation_windows: int | None = None
+    rhythm_consistency: float | None = None
+    burst_speaking_segments: int | None = None
+    slow_down_segments: int | None = None
+    speed_up_segments: int | None = None
+    articulation_rate: float | None = None
+
+
+class ArticulationMetrics(BaseModel):
+    articulation_rate: float | None = None
+    phoneme_timing_consistency: float | None = None
+    speech_precision: float | None = None
+    word_duration_mean_ms: float | None = None
+    word_duration_std_ms: float | None = None
+    word_duration_cv: float | None = None
+    clarity_proxy: float | None = None
+    articulation_stability: float | None = None
+
+
+class VADMetrics(BaseModel):
+    speech_ratio: float | None = None
+    total_speech_duration_ms: int | None = None
+    total_silence_duration_ms: int | None = None
+    pause_durations_ms: list[float] = Field(default_factory=list)
+    long_pauses_ms: list[float] = Field(default_factory=list)
+    mid_sentence_pauses_ms: list[float] = Field(default_factory=list)
+    end_of_sentence_pauses_ms: list[float] = Field(default_factory=list)
+    avg_pause_duration_ms: float | None = None
+    pause_frequency_per_minute: float | None = None
+
+
 class DerivedMetrics(BaseModel):
     monotony_index: float | None = None
     hesitation_cluster_score: float | None = None
     dynamic_emphasis_score: float | None = None
     speech_continuity_score: float | None = None
     confidence_drop_count: int | None = None
+    # Milestone 3 derived indices
+    vocal_command_index: float | None = None
+    composure_index: float | None = None
+    rhythm_index: float | None = None
+    projection_index: float | None = None
+    authority_signal_index: float | None = None
 
 
 class Metrics(BaseModel):
     raw_acoustic: RawAcousticMetrics
     linguistic: LinguisticMetrics
     derived: DerivedMetrics
+    # Milestone 3 additional metric categories
+    rhythm: RhythmMetrics = Field(default_factory=RhythmMetrics)
+    articulation: ArticulationMetrics = Field(default_factory=ArticulationMetrics)
+    vad: VADMetrics = Field(default_factory=VADMetrics)
 
 
 # --- Perception profile ---
