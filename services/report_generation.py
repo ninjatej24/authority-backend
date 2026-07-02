@@ -368,6 +368,11 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
                 why.append(reasoning.biggest_linguistic_contributor)
             if reasoning.biggest_behavioural_contributor:
                 why.append(reasoning.biggest_behavioural_contributor)
+        detail = scores.dimension_details.get(dimension)
+        if detail:
+            contributor_notes = detail.positive_contributors + detail.negative_contributors
+            if contributor_notes:
+                why = contributor_notes[:4]
         label = "strong" if score >= 75 else "developing" if score >= 58 else "limited"
         reports[dimension] = ReportDimensionReport(
             dimension=DIMENSION_LABELS[dimension],
@@ -492,14 +497,21 @@ def _technical_appendix(metrics: Metrics, scores: Scores, audio_quality: AudioQu
     selected = {}
     for label, (section, field) in TECHNICAL_APPENDIX_METRICS.items():
         selected[label] = metric_dump.get(section, {}).get(field)
-    return ReportTechnicalAppendix(metrics=selected, audio_quality_warnings=audio_quality.quality_warnings, score_components=scores.score_components.model_dump(), evidence_ids=evidence_ids)
+    score_components = scores.score_components.model_dump()
+    score_components["calibration_metadata"] = scores.calibration_metadata.model_dump()
+    score_components["fairness_adjustments"] = scores.fairness_adjustments.model_dump()
+    score_components["score_band"] = scores.score_band
+    score_components["score_rarity_label"] = scores.score_rarity_label
+    return ReportTechnicalAppendix(metrics=selected, audio_quality_warnings=audio_quality.quality_warnings, score_components=score_components, evidence_ids=evidence_ids)
 
 
 def _share_card(scores: Scores, authority_type: ReportAuthorityType, mirror: ReportMirror, diagnosis: ReportDiagnosis) -> ReportShareCard:
     percentile_label = None
     if scores.score_confidence is not None and scores.score_confidence >= 0.6 and scores.authority_percentile_estimate is not None:
-        percentile = int(round(scores.authority_percentile_estimate * 100))
-        percentile_label = f"Top {max(1, 100 - percentile)}% for vocal authority"
+        percentile_label = scores.score_rarity_label
+        if not percentile_label:
+            percentile = int(round(scores.authority_percentile_estimate * 100))
+            percentile_label = f"Top {max(1, 100 - percentile)}% for vocal authority"
     return ReportShareCard(
         authority_score=scores.authority_score,
         authority_type=authority_type.label,

@@ -557,6 +557,9 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         linguistic_dict,
         audio_quality_penalty=audio_penalty,
         acoustic=acoustic,
+        audio_quality_usable=audio_quality.usable,
+        asr_confidence=transcription.transcript.overall_asr_confidence,
+        duration_ms=duration_ms,
     )
 
     perception = build_perception_profile(
@@ -602,15 +605,36 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         if reason not in uncertainty.reasons:
             uncertainty.reasons.append(reason)
 
+    adjusted_confidence = _score_confidence_adjustment(
+        scoring.scores.score_confidence or 0.79,
+        audio_quality.usable,
+        transcription.transcript.overall_asr_confidence,
+        duration_ms,
+        uncertainty.overall_confidence_label,
+    )
+    confidence_label = (
+        "high"
+        if adjusted_confidence >= 0.8
+        else "medium_high"
+        if adjusted_confidence >= 0.65
+        else "medium"
+        if adjusted_confidence >= 0.45
+        else "low"
+    )
     scores = scoring.scores.model_copy(
         update={
-            "score_confidence": _score_confidence_adjustment(
-                scoring.scores.score_confidence or 0.79,
-                audio_quality.usable,
-                transcription.transcript.overall_asr_confidence,
-                duration_ms,
-                uncertainty.overall_confidence_label,
-            )
+            "score_confidence": adjusted_confidence,
+            "score_explanation": scoring.scores.score_explanation.model_copy(
+                update={
+                    "confidence_label": confidence_label,
+                    "confidence_reasons": list(
+                        dict.fromkeys(
+                            scoring.scores.score_explanation.confidence_reasons
+                            + uncertainty.reasons
+                        )
+                    ),
+                }
+            ),
         }
     )
 

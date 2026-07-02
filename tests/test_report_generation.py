@@ -145,3 +145,12 @@ def test_report_does_not_invent_scores_or_expose_private_share_findings():
     ).lower()
     assert "approval seeking" not in public_text
     assert "nervous" not in public_text
+
+
+def test_report_consumes_v2_scoring_metadata():
+    report = _generated_report()
+    appendix = report.technical_appendix.score_components
+
+    assert "calibration_metadata" in appendix
+    assert "fairness_adjustments" in appendix
+    assert "score_rarity_label" in appendix

@@ -73,6 +73,15 @@ class DimensionScores(BaseModel):
     structure: int
 
 
+class DimensionScoreDetail(BaseModel):
+    score: int
+    confidence: float = 0.0
+    positive_contributors: list[str] = Field(default_factory=list)
+    negative_contributors: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    uncertainty_reasons: list[str] = Field(default_factory=list)
+
+
 class DerivedAxes(BaseModel):
     trust_warmth: int
     dominance_status: int
@@ -93,12 +102,57 @@ class ScorePenalties(BaseModel):
     monotony_penalty: float = 0.0
     rising_ending_penalty: float = 0.0
     audio_quality_penalty: float = 0.0
+    short_speech_penalty: float = 0.0
+    low_confidence_penalty: float = 0.0
+    mid_recording_collapse_penalty: float = 0.0
+
+
+class ScoreComponentItem(BaseModel):
+    id: str
+    label: str
+    value: float
+    reason: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ScoreCap(BaseModel):
+    id: str
+    label: str
+    value: float
+    reason: str
+    evidence_ids: list[str] = Field(default_factory=list)
 
 
 class ScoreComponents(BaseModel):
     weighted_base: float
     bonuses: ScoreBonuses
     penalties: ScorePenalties
+    bonus_items: list[ScoreComponentItem] = Field(default_factory=list)
+    penalty_items: list[ScoreComponentItem] = Field(default_factory=list)
+    caps_applied: list[ScoreCap] = Field(default_factory=list)
+    calibration_adjustment: float = 0.0
+    final_score: int | None = None
+
+
+class CalibrationMetadata(BaseModel):
+    calibration_version: str = "authority_score_v2.0"
+    method: str = "deterministic_v2_pre_human_corpus"
+    latent_score: float = 0.0
+    calibrated_score: float = 0.0
+    calibration_notes: list[str] = Field(default_factory=list)
+    future_human_corpus_ready: bool = True
+
+
+class FairnessAdjustments(BaseModel):
+    applied_adjustments: list[str] = Field(default_factory=list)
+    suppressed_features: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ScoreExplanation(BaseModel):
+    confidence_label: Literal["low", "medium", "medium_high", "high"] = "medium"
+    confidence_reasons: list[str] = Field(default_factory=list)
+    component_summary: list[ScoreComponentItem] = Field(default_factory=list)
 
 
 class Scores(BaseModel):
@@ -106,8 +160,16 @@ class Scores(BaseModel):
     authority_percentile_estimate: float | None = None
     score_confidence: float | None = None
     dimension_scores: DimensionScores
+    dimension_details: dict[str, DimensionScoreDetail] = Field(default_factory=dict)
     derived_axes: DerivedAxes
     score_components: ScoreComponents
+    calibration_metadata: CalibrationMetadata = Field(default_factory=CalibrationMetadata)
+    fairness_adjustments: FairnessAdjustments = Field(default_factory=FairnessAdjustments)
+    score_explanation: ScoreExplanation = Field(default_factory=ScoreExplanation)
+    score_band: str | None = None
+    score_band_label: str | None = None
+    score_interpretation: str | None = None
+    score_rarity_label: str | None = None
 
 
 # --- Metrics ---
