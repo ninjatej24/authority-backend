@@ -855,6 +855,9 @@ class ClaimValidation(BaseModel):
     suppressed: bool = False
     suppression_reason: str | None = None
     failed_checks: list[str] = Field(default_factory=list)
+    missing_dependencies: list[str] = Field(default_factory=list)
+    confidence_before_suppression: float | None = None
+    minimum_required_confidence: float = 0.35
 
 
 class ExplainabilityClaim(BaseModel):
@@ -886,6 +889,8 @@ class ValidationSummary(BaseModel):
     orphan_evidence_ids: list[str] = Field(default_factory=list)
     orphan_moment_ids: list[str] = Field(default_factory=list)
     orphan_drill_ids: list[str] = Field(default_factory=list)
+    missing_drill_references: list[str] = Field(default_factory=list)
+    invalid_dependency_references: list[str] = Field(default_factory=list)
     missing_dependency_claims: list[str] = Field(default_factory=list)
 
 
@@ -900,6 +905,12 @@ class ReportAudit(BaseModel):
     orphan_moment_count: int = 0
     consistency_score: float = 0.0
     report_integrity_score: float = 0.0
+    validated_claim_percentage: float = 0.0
+    validated_reference_percentage: float = 0.0
+    drill_validation_score: float = 0.0
+    evidence_validation_score: float = 0.0
+    moment_validation_score: float = 0.0
+    overall_integrity_grade: Literal["A", "B", "C", "D", "F"] = "F"
 
 
 class ExplainabilityBundle(BaseModel):

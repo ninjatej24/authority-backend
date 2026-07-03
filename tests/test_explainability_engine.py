@@ -164,6 +164,77 @@ def test_validation_catches_broken_references_and_integrity_drops():
     assert bundle.audit.report_integrity_score < 1.0
 
 
+def test_report_cannot_validate_its_own_evidence_or_moments():
+    report = _generated_report()
+    report = report.model_copy(
+        update={
+            "evidence_chain": [
+                *report.evidence_chain,
+                report.evidence_chain[0].model_copy(update={"evidence_id": "report_only_ev"}),
+            ],
+            "timeline": [
+                *report.timeline,
+                report.timeline[0].model_copy(update={"moment_id": "report_only_moment"}),
+            ],
+            "mirror": report.mirror.model_copy(update={"evidence_ids": ["report_only_ev"]}),
+            "primary_diagnosis": report.primary_diagnosis.model_copy(update={"supporting_moment_ids": ["report_only_moment"]}) if report.primary_diagnosis else None,
+        }
+    )
+    bundle = _bundle(report=report)
+
+    assert "report_only_ev" in bundle.validation_summary.orphan_evidence_ids
+    assert "report_only_moment" in bundle.validation_summary.orphan_moment_ids
+    assert bundle.audit.evidence_validation_score < 1.0
+    assert bundle.audit.moment_validation_score < 1.0
+
+
+def test_invalid_drills_and_dependency_references_are_reported():
+    bundle = _bundle()
+    report = _generated_report()
+    coaching = _bundle().claims  # keep a deterministic object allocation separate from the mutated bundle
+    del coaching, bundle
+
+    metrics = _metrics()
+    scores = _softened_expert_scores()
+    audio_quality = AudioQuality(usable=True, background_noise_level="low")
+    uncertainty = Uncertainty(overall_confidence_label="medium_high", reasons=[])
+    evidence = _evidence()
+    moments = _moments()
+    inference = _infer(metrics, audio_quality=audio_quality, duration_ms=60000)
+    diagnostic = _diagnostic(scores=scores, metrics=metrics, audio_quality=audio_quality, uncertainty=uncertainty, duration_ms=60000, scenario="benchmark", inference=inference, evidence=evidence, moments=moments)
+    coaching_engine = build_deterministic_coaching(metrics=metrics, scores=scores, psychological_inference=inference, diagnostic_reasoning=diagnostic, report=None, audio_quality=audio_quality, uncertainty=uncertainty, duration_ms=60000, scenario="benchmark")
+    report = report.model_copy(
+        update={
+            "training_prescription": report.training_prescription.model_copy(update={"drill_id": "missing_drill_v1"}),
+            "highest_leverage_fix": report.highest_leverage_fix.model_copy(update={"first_drill_id": "missing_fix_v1"}),
+        }
+    )
+    coaching_engine = coaching_engine.model_copy(
+        update={
+            "dependency_graph": [
+                *coaching_engine.dependency_graph,
+                coaching_engine.dependency_graph[0].model_copy(update={"after": "missing_dependency_v1"}),
+            ]
+        }
+    )
+    checked = build_explainability(metrics=metrics, evidence=evidence, psychological_inference=inference, diagnostic_reasoning=diagnostic, scores=scores, scenario="benchmark", coaching_engine=coaching_engine, report=report, progress=build_progress(_snapshot()), moments=moments, audio_quality=audio_quality, uncertainty=uncertainty)
+
+    assert "missing_drill_v1" in checked.validation_summary.orphan_drill_ids
+    assert "missing_fix_v1" in checked.validation_summary.orphan_drill_ids
+    assert "missing_dependency_v1" in checked.validation_summary.invalid_dependency_references
+    assert checked.audit.drill_validation_score < 1.0
+
+
+def test_claim_fails_with_insufficient_upstream_evidence_but_metric_backed_score_succeeds():
+    report = _generated_report()
+    diagnostic = report.diagnostic_reasoning.model_copy(update={"primary_diagnosis": report.primary_diagnosis.model_copy(update={"supporting_evidence_ids": []})})
+    bundle = _bundle(diagnostic_reasoning=diagnostic, report=report)
+
+    assert "missing_upstream_dependency" in _claim(bundle, "primary_diagnosis").validation.failed_checks
+    assert _claim(bundle, "authority_score").validation.valid is True
+    assert _claim(bundle, "authority_score").supporting_metrics
+
+
 def test_audit_metadata_is_deterministic_and_counts_claims():
     bundle = _bundle()
 
@@ -171,6 +242,9 @@ def test_audit_metadata_is_deterministic_and_counts_claims():
     assert "explainability" in bundle.audit.analysis_steps_completed
     assert bundle.audit.validated_claim_count + bundle.audit.failed_validation_count == len(bundle.claims)
     assert 0.0 <= bundle.audit.report_integrity_score <= 1.0
+    assert 0.0 <= bundle.audit.validated_claim_percentage <= 1.0
+    assert 0.0 <= bundle.audit.validated_reference_percentage <= 1.0
+    assert bundle.audit.overall_integrity_grade in {"A", "B", "C", "D", "F"}
 
 
 @patch("services.coaching_engine._get_client")
