@@ -60,7 +60,10 @@ def test_first_benchmark_establishes_baseline_without_fabricating_progress():
 
     assert progress.comparison_available is False
     assert progress.state.state == "first_benchmark"
+    assert progress.state.progress_status == "first_benchmark"
     assert progress.state.baseline_established is True
+    assert progress.state.next_retest_recommendation is not None
+    assert progress.state.expected_future_comparisons
     assert progress.delta_authority_score is None
     assert progress.milestones[0].milestone_id == "first_benchmark"
 
@@ -71,6 +74,7 @@ def test_second_benchmark_computes_score_dimension_and_metric_deltas():
     progress = build_progress(current, [previous])
 
     assert progress.comparison_available is True
+    assert progress.state.progress_status == "comparison_available"
     assert progress.delta_authority_score == 8
     assert progress.comparison.overall_trend == "improved"
     assert progress.dimension_delta_details["command"].absolute_delta == 10
@@ -140,9 +144,30 @@ def test_scenario_mismatch_and_poor_audio_reduce_progress_confidence():
     allowed = build_progress(current, [previous], allow_cross_scenario=True)
 
     assert blocked.comparison_available is False
+    assert blocked.state.state == "no_compatible_history"
+    assert blocked.state.progress_status == "no_compatible_history"
+    assert blocked.state.reason == "scenario_mismatch"
+    assert blocked.state.current_scenario == "sales"
+    assert blocked.state.available_history_scenarios == ["interview"]
+    assert blocked.state.cross_scenario_comparison_blocked is True
+    assert blocked.state.user_safe_explanation
+    assert any("Cross-scenario comparison is disabled" in reason for reason in blocked.confidence.reasons)
+    assert any("Previous recordings use a different scenario" in reason for reason in blocked.confidence.reasons)
     assert allowed.comparison.same_scenario is False
     assert allowed.confidence.confidence <= 0.45
     assert any("Scenario mismatch" in reason for reason in allowed.confidence.reasons)
+
+
+def test_no_compatible_history_does_not_pretend_to_be_first_benchmark():
+    previous = _snapshot("a1", scenario="leadership")
+    current = _snapshot("a2", scenario="podcast", created_at="2026-07-02T10:00:00Z")
+    progress = build_progress(current, [previous])
+
+    assert progress.comparison_available is False
+    assert progress.state.state != "first_benchmark"
+    assert progress.state.progress_status == "no_compatible_history"
+    assert progress.delta_authority_score is None
+    assert progress.dimension_deltas is None
 
 
 def test_progress_schema_round_trip_inside_authority_response():

@@ -586,12 +586,19 @@ class ProgressComparison(BaseModel):
 
 
 class ProgressState(BaseModel):
-    state: Literal["first_benchmark", "retest", "latest_benchmark"] = "first_benchmark"
+    state: Literal["first_benchmark", "retest", "latest_benchmark", "no_compatible_history"] = "first_benchmark"
+    progress_status: Literal["first_benchmark", "comparison_available", "no_compatible_history"] = "first_benchmark"
+    reason: str | None = None
+    current_scenario: str | None = None
+    available_history_scenarios: list[str] = Field(default_factory=list)
+    cross_scenario_comparison_blocked: bool = False
+    user_safe_explanation: str | None = None
     baseline_established: bool = False
     latest_benchmark_id: str | None = None
     history_count: int = 0
     progress_preview: list[str] = Field(default_factory=list)
     expected_future_comparisons: list[str] = Field(default_factory=list)
+    next_retest_recommendation: RetestRecommendation | None = None
 
 
 class Progress(BaseModel):
@@ -836,6 +843,72 @@ class ReportValidation(BaseModel):
     duplicate_sections: list[str] = Field(default_factory=list)
 
 
+class AlternativeInterpretation(BaseModel):
+    alternative_id: str
+    text: str
+    reason: str
+    confidence: float = 0.0
+
+
+class ClaimValidation(BaseModel):
+    valid: bool = True
+    suppressed: bool = False
+    suppression_reason: str | None = None
+    failed_checks: list[str] = Field(default_factory=list)
+
+
+class ExplainabilityClaim(BaseModel):
+    claim_id: str
+    claim: str | None = None
+    claim_type: str
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    supporting_metrics: list[str] = Field(default_factory=list)
+    supporting_traits: list[str] = Field(default_factory=list)
+    supporting_moments: list[str] = Field(default_factory=list)
+    supporting_dimensions: list[str] = Field(default_factory=list)
+    positive_evidence: list[str] = Field(default_factory=list)
+    negative_evidence: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    confidence_label: Literal["low", "medium", "medium_high", "high"] = "low"
+    confidence_reasons: list[str] = Field(default_factory=list)
+    uncertainty_reasons: list[str] = Field(default_factory=list)
+    suppressed: bool = False
+    suppression_reason: str | None = None
+    alternative_interpretations: list[AlternativeInterpretation] = Field(default_factory=list)
+    validation: ClaimValidation = Field(default_factory=ClaimValidation)
+
+
+class ValidationSummary(BaseModel):
+    valid: bool = True
+    checked_claims: int = 0
+    suppressed_claims: int = 0
+    failed_claims: int = 0
+    orphan_evidence_ids: list[str] = Field(default_factory=list)
+    orphan_moment_ids: list[str] = Field(default_factory=list)
+    orphan_drill_ids: list[str] = Field(default_factory=list)
+    missing_dependency_claims: list[str] = Field(default_factory=list)
+
+
+class ReportAudit(BaseModel):
+    engine_version: str = "explainability_v1"
+    pipeline_version: str = "authority.v2.milestone11"
+    analysis_steps_completed: list[str] = Field(default_factory=list)
+    suppressed_claim_count: int = 0
+    validated_claim_count: int = 0
+    failed_validation_count: int = 0
+    orphan_evidence_count: int = 0
+    orphan_moment_count: int = 0
+    consistency_score: float = 0.0
+    report_integrity_score: float = 0.0
+
+
+class ExplainabilityBundle(BaseModel):
+    claims: list[ExplainabilityClaim] = Field(default_factory=list)
+    contradictions: list[DiagnosticContradiction] = Field(default_factory=list)
+    validation_summary: ValidationSummary = Field(default_factory=ValidationSummary)
+    audit: ReportAudit = Field(default_factory=ReportAudit)
+
+
 class AuthorityReport(BaseModel):
     mirror: ReportMirror | None = None
     diagnosis: ReportDiagnosis | None = None
@@ -852,6 +925,7 @@ class AuthorityReport(BaseModel):
     technical_appendix: ReportTechnicalAppendix | None = None
     scenario_summary: ReportScenarioSummary | None = None
     progress: Progress | None = None
+    explainability: ExplainabilityBundle | None = None
     diagnostic_reasoning: DiagnosticReasoning | None = None
     primary_diagnosis: DiagnosticDiagnosis | None = None
     secondary_diagnosis: DiagnosticDiagnosis | None = None
@@ -1074,6 +1148,7 @@ class AuthorityV2Response(BaseModel):
     report: AuthorityReport = Field(default_factory=AuthorityReport)
     coaching_engine: CoachingEngine = Field(default_factory=CoachingEngine)
     progress: Progress = Field(default_factory=Progress)
+    explainability: ExplainabilityBundle = Field(default_factory=ExplainabilityBundle)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
     safety: Safety = Field(default_factory=Safety)

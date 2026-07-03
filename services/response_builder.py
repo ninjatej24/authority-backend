@@ -37,6 +37,7 @@ from services.evidence import (
     add_voice_quality_evidence,
     serialize_evidence_collection,
 )
+from services.explainability_engine import build_explainability
 from services.inference_engine import (
     analyze_cognition,
     build_evidence,
@@ -46,7 +47,7 @@ from services.inference_engine import (
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 from services.moments import build_moments
 from services.psychological_inference import build_psychological_inference
-from services.progress_engine import build_progress, snapshot_from_response
+from services.progress_engine import ProgressSnapshot, build_progress, snapshot_from_response
 from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
@@ -305,7 +306,11 @@ def _deterministic_drills(coaching_engine) -> list[Drill]:
     return drills
 
 
-def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response:
+def run_analysis(
+    client: OpenAI,
+    request: AnalyzeRequest,
+    history_snapshots: list[ProgressSnapshot] | None = None,
+) -> AuthorityV2Response:
     """Execute the full v2 analysis pipeline."""
     preprocessed = preprocess_audio(request.file_path)
     wav_path = preprocessed.wav_path
@@ -735,10 +740,25 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         coaching_engine=coaching_engine,
         uncertainty=uncertainty,
     )
-    progress = build_progress(snapshot_from_response(response), [])
+    progress = build_progress(snapshot_from_response(response), history_snapshots or [])
+    explainability = build_explainability(
+        metrics=metrics_payload,
+        evidence=evidence,
+        psychological_inference=psychological_inference,
+        diagnostic_reasoning=diagnostic_reasoning,
+        scores=scores,
+        scenario=_map_scenario(request.context),
+        coaching_engine=coaching_engine,
+        report=report,
+        progress=progress,
+        moments=moments,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+    )
     return response.model_copy(
         update={
             "progress": progress,
-            "report": report.model_copy(update={"progress": progress}),
+            "explainability": explainability,
+            "report": report.model_copy(update={"progress": progress, "explainability": explainability}),
         }
     )

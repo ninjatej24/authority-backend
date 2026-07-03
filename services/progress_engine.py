@@ -239,6 +239,12 @@ def _confidence(current: ProgressSnapshot, target: ProgressSnapshot | None, comp
     return ProgressConfidence(confidence=round(confidence, 2), confidence_label=label, reasons=list(dict.fromkeys(reasons)))  # type: ignore[arg-type]
 
 
+def _unavailable_confidence(current: ProgressSnapshot, reasons: list[str]) -> ProgressConfidence:
+    confidence = min(current.score_confidence, 0.45)
+    label = "medium" if confidence >= 0.45 else "low"
+    return ProgressConfidence(confidence=round(confidence, 2), confidence_label=label, reasons=list(dict.fromkeys(reasons)))  # type: ignore[arg-type]
+
+
 def _authority_evolution(previous: ProgressSnapshot | None, current: ProgressSnapshot, dimension_deltas: dict[str, DimensionDelta]) -> AuthorityEvolution:
     if not previous:
         return AuthorityEvolution(current_type=current.authority_type, status="unavailable", confidence=current.score_confidence)
@@ -287,16 +293,53 @@ def build_progress(current: ProgressSnapshot, history: list[ProgressSnapshot] | 
     compatible = target is not None and (target.scenario == current.scenario or allow_cross_scenario)
 
     if not target:
+        if ordered:
+            available_scenarios = sorted({item.scenario for item in ordered})
+            reason = "scenario_mismatch" if current.scenario not in available_scenarios else "no_valid_comparison_target"
+            confidence_reasons = ["Insufficient compatible history"]
+            if reason == "scenario_mismatch":
+                confidence_reasons.extend([
+                    "Previous recordings use a different scenario",
+                    "Cross-scenario comparison is disabled",
+                ])
+            return Progress(
+                comparison_available=False,
+                baseline_analysis_id=baseline.analysis_id if baseline else None,
+                state=ProgressState(
+                    state="no_compatible_history",
+                    progress_status="no_compatible_history",
+                    reason=reason,
+                    current_scenario=current.scenario,
+                    available_history_scenarios=available_scenarios,
+                    cross_scenario_comparison_blocked=not allow_cross_scenario,
+                    user_safe_explanation="Previous recordings exist, but none are compatible with this comparison.",
+                    baseline_established=True,
+                    latest_benchmark_id=current.analysis_id,
+                    history_count=len(ordered),
+                    progress_preview=["comparison_unavailable"],
+                    expected_future_comparisons=["same_scenario_retest", "authority_score", "six_dimensions", "coaching_focus"],
+                    next_retest_recommendation=_retest_recommendation(current),
+                ),
+                retest_recommendation=_retest_recommendation(current),
+                confidence=_unavailable_confidence(current, confidence_reasons),
+            )
         return Progress(
             comparison_available=False,
             baseline_analysis_id=baseline.analysis_id if baseline else None,
             state=ProgressState(
                 state="first_benchmark",
+                progress_status="first_benchmark",
+                reason="no_previous_benchmark",
+                current_scenario=current.scenario,
+                available_history_scenarios=[],
+                cross_scenario_comparison_blocked=False,
+                user_safe_explanation="This is the first benchmark, so progress comparisons will begin after the next compatible recording.",
                 baseline_established=True,
                 latest_benchmark_id=current.analysis_id,
                 history_count=len(ordered),
                 progress_preview=["baseline_established"],
                 expected_future_comparisons=["authority_score", "six_dimensions", "coaching_focus", "moments"],
+                next_retest_recommendation=_retest_recommendation(current),
             ),
             milestones=[Milestone(milestone_id="first_benchmark", label="First benchmark", source_analysis_id=current.analysis_id, confidence=current.score_confidence)],
             retest_recommendation=_retest_recommendation(current),
@@ -326,7 +369,20 @@ def build_progress(current: ProgressSnapshot, history: list[ProgressSnapshot] | 
         baseline_analysis_id=baseline.analysis_id if baseline else target.analysis_id,
         delta_authority_score=score_delta,
         dimension_deltas={key: value.absolute_delta or 0.0 for key, value in dimension_deltas.items()},
-        state=ProgressState(state="retest", baseline_established=True, latest_benchmark_id=current.analysis_id, history_count=len(ordered), progress_preview=[trend], expected_future_comparisons=["trend", "stability", "coaching_evolution"]),
+        state=ProgressState(
+            state="retest",
+            progress_status="comparison_available",
+            current_scenario=current.scenario,
+            available_history_scenarios=sorted({item.scenario for item in ordered}),
+            cross_scenario_comparison_blocked=False,
+            user_safe_explanation="Progress is compared against the latest compatible recording.",
+            baseline_established=True,
+            latest_benchmark_id=current.analysis_id,
+            history_count=len(ordered),
+            progress_preview=[trend],
+            expected_future_comparisons=["trend", "stability", "coaching_evolution"],
+            next_retest_recommendation=_retest_recommendation(current),
+        ),
         comparison=ProgressComparison(
             current_analysis_id=current.analysis_id,
             comparison_target_id=target.analysis_id,
