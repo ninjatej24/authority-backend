@@ -144,6 +144,8 @@ def test_analyze_returns_valid_authority_v2(
     assert model.scores.dimension_scores.command >= 20
     assert model.progress.state.progress_status == "first_benchmark"
     assert model.progress.comparison_available is False
+    assert model.pipeline_validation.pipeline_version == "authority.v2.milestone12"
+    assert model.pipeline_validation.audit.completed_stages
     assert model.recommendations.fastest_improvement_tip
     assert model.paywall.locked_modules
     assert model.safety.responsible_framing

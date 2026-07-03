@@ -1131,6 +1131,52 @@ class CoachingEngine(BaseModel):
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
 
 
+# --- Pipeline validation ---
+
+
+class PipelineStageStatus(BaseModel):
+    stage_id: str
+    completed: bool = False
+    status: Literal["completed", "warning", "failed", "suppressed"] = "failed"
+    dependencies: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class PipelineValidationIssue(BaseModel):
+    issue_id: str
+    stage: str
+    severity: Literal["info", "warning", "error"] = "warning"
+    message: str
+    references: list[str] = Field(default_factory=list)
+
+
+class PipelineAudit(BaseModel):
+    pipeline_version: str = "authority.v2.milestone12"
+    schema_version: str = "authority.v2"
+    completed_stages: list[str] = Field(default_factory=list)
+    failed_stages: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    validation_score: float = 0.0
+    dependency_score: float = 0.0
+    consistency_score: float = 0.0
+    integrity_score: float = 0.0
+    overall_pipeline_health: Literal["healthy", "degraded", "invalid"] = "invalid"
+
+
+class PipelineValidation(BaseModel):
+    pipeline_version: str = "authority.v2.milestone12"
+    schema_version: str = "authority.v2"
+    valid: bool = True
+    stages: list[PipelineStageStatus] = Field(default_factory=list)
+    dependency_issues: list[PipelineValidationIssue] = Field(default_factory=list)
+    consistency_issues: list[PipelineValidationIssue] = Field(default_factory=list)
+    integrity_issues: list[PipelineValidationIssue] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    duplicate_ids: dict[str, list[str]] = Field(default_factory=dict)
+    missing_references: dict[str, list[str]] = Field(default_factory=dict)
+    null_outputs: list[str] = Field(default_factory=list)
+    audit: PipelineAudit = Field(default_factory=PipelineAudit)
+
 
 
 # --- Top-level response ---
@@ -1160,6 +1206,7 @@ class AuthorityV2Response(BaseModel):
     coaching_engine: CoachingEngine = Field(default_factory=CoachingEngine)
     progress: Progress = Field(default_factory=Progress)
     explainability: ExplainabilityBundle = Field(default_factory=ExplainabilityBundle)
+    pipeline_validation: PipelineValidation = Field(default_factory=PipelineValidation)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
     safety: Safety = Field(default_factory=Safety)

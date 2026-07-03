@@ -48,6 +48,7 @@ from services.linguistic_metrics import build_linguistic_metrics, compute_delive
 from services.moments import build_moments
 from services.psychological_inference import build_psychological_inference
 from services.progress_engine import ProgressSnapshot, build_progress, snapshot_from_response
+from services.pipeline_validator import build_pipeline_validation
 from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
@@ -755,10 +756,13 @@ def run_analysis(
         audio_quality=audio_quality,
         uncertainty=uncertainty,
     )
-    return response.model_copy(
+    final_response = response.model_copy(
         update={
             "progress": progress,
             "explainability": explainability,
             "report": report.model_copy(update={"progress": progress, "explainability": explainability}),
         }
+    )
+    return final_response.model_copy(
+        update={"pipeline_validation": build_pipeline_validation(final_response)}
     )
