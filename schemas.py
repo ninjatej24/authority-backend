@@ -482,11 +482,142 @@ class Drill(BaseModel):
 # --- Progress, paywall, uncertainty, safety ---
 
 
+class DimensionDelta(BaseModel):
+    dimension: str
+    old_score: int | None = None
+    new_score: int | None = None
+    absolute_delta: float | None = None
+    relative_delta: float | None = None
+    trend: Literal["improved", "unchanged", "declined", "unavailable"] = "unavailable"
+    confidence: float = 0.0
+
+
+class MetricDelta(BaseModel):
+    metric_id: str
+    old_value: float | None = None
+    new_value: float | None = None
+    absolute_delta: float | None = None
+    relative_delta: float | None = None
+    trend: Literal["improved", "unchanged", "declined", "unavailable"] = "unavailable"
+    confidence: float = 0.0
+
+
+class MomentDelta(BaseModel):
+    moment_type: str
+    status: Literal["new_strength", "resolved_weakness", "persistent_weakness", "new_weakness", "unchanged", "unavailable"] = "unavailable"
+    previous_count: int = 0
+    current_count: int = 0
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class TrendSummary(BaseModel):
+    score_trend: Literal["improving", "stable", "declining", "insufficient_history"] = "insufficient_history"
+    dimension_trend: dict[str, str] = Field(default_factory=dict)
+    metric_trend: dict[str, str] = Field(default_factory=dict)
+    coaching_trend: str | None = None
+    authority_type_trend: str | None = None
+
+
+class WeeklySummary(BaseModel):
+    largest_improvement: str | None = None
+    remaining_limiter: str | None = None
+    best_moment: str | None = None
+    most_improved_dimension: str | None = None
+    least_improved_dimension: str | None = None
+    completed_drills: list[str] = Field(default_factory=list)
+    recommended_focus: str | None = None
+
+
+class Milestone(BaseModel):
+    milestone_id: str
+    label: str
+    achieved: bool = True
+    source_analysis_id: str | None = None
+    confidence: float = 0.0
+
+
+class RetestRecommendation(BaseModel):
+    recommended_retest_after_days: int = 3
+    why: str | None = None
+    what_to_compare: list[str] = Field(default_factory=list)
+    success_definition: str | None = None
+    comparison_focus: str | None = None
+
+
+class AuthorityEvolution(BaseModel):
+    previous_type: str | None = None
+    current_type: str | None = None
+    status: Literal["unchanged", "strengthening", "shifting", "unavailable"] = "unavailable"
+    new_dominant_characteristics: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class CoachingEvolution(BaseModel):
+    completed_focus: list[str] = Field(default_factory=list)
+    continuing_focus: list[str] = Field(default_factory=list)
+    new_focus: list[str] = Field(default_factory=list)
+    resolved_interventions: list[str] = Field(default_factory=list)
+    new_interventions: list[str] = Field(default_factory=list)
+    dependency_progression: list[str] = Field(default_factory=list)
+    future_queue_advancement: list[str] = Field(default_factory=list)
+
+
+class ProgressConfidence(BaseModel):
+    confidence: float = 0.0
+    confidence_label: Literal["low", "medium", "medium_high", "high"] = "low"
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ProgressComparison(BaseModel):
+    current_analysis_id: str | None = None
+    comparison_target_id: str | None = None
+    previous_best_id: str | None = None
+    previous_worst_id: str | None = None
+    same_scenario: bool = True
+    compatible: bool = True
+    authority_score_delta: float | None = None
+    percentage_change: float | None = None
+    relative_improvement: float | None = None
+    band_movement: str | None = None
+    rarity_movement: str | None = None
+    confidence_movement: float | None = None
+    overall_trend: Literal["improved", "unchanged", "declined", "unavailable"] = "unavailable"
+
+
+class ProgressState(BaseModel):
+    state: Literal["first_benchmark", "retest", "latest_benchmark"] = "first_benchmark"
+    baseline_established: bool = False
+    latest_benchmark_id: str | None = None
+    history_count: int = 0
+    progress_preview: list[str] = Field(default_factory=list)
+    expected_future_comparisons: list[str] = Field(default_factory=list)
+
+
 class Progress(BaseModel):
     comparison_available: bool = False
     baseline_analysis_id: str | None = None
     delta_authority_score: float | None = None
     dimension_deltas: dict[str, float] | None = None
+    state: ProgressState = Field(default_factory=ProgressState)
+    comparison: ProgressComparison | None = None
+    dimension_delta_details: dict[str, DimensionDelta] = Field(default_factory=dict)
+    metric_deltas: dict[str, MetricDelta] = Field(default_factory=dict)
+    moment_comparison: list[MomentDelta] = Field(default_factory=list)
+    authority_evolution: AuthorityEvolution = Field(default_factory=AuthorityEvolution)
+    coaching_evolution: CoachingEvolution = Field(default_factory=CoachingEvolution)
+    trend_summary: TrendSummary = Field(default_factory=TrendSummary)
+    weekly_summary: WeeklySummary = Field(default_factory=WeeklySummary)
+    milestones: list[Milestone] = Field(default_factory=list)
+    regressions: list[Milestone] = Field(default_factory=list)
+    consistency_score: float | None = None
+    stability_score: float | None = None
+    volatility_score: float | None = None
+    evidence_consistency: float | None = None
+    dimension_stability: float | None = None
+    authority_stability: float | None = None
+    retest_recommendation: RetestRecommendation = Field(default_factory=RetestRecommendation)
+    confidence: ProgressConfidence = Field(default_factory=ProgressConfidence)
 
 
 class FreePreview(BaseModel):
@@ -720,6 +851,7 @@ class AuthorityReport(BaseModel):
     share_card: ReportShareCard | None = None
     technical_appendix: ReportTechnicalAppendix | None = None
     scenario_summary: ReportScenarioSummary | None = None
+    progress: Progress | None = None
     diagnostic_reasoning: DiagnosticReasoning | None = None
     primary_diagnosis: DiagnosticDiagnosis | None = None
     secondary_diagnosis: DiagnosticDiagnosis | None = None

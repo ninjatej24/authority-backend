@@ -46,6 +46,7 @@ from services.inference_engine import (
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 from services.moments import build_moments
 from services.psychological_inference import build_psychological_inference
+from services.progress_engine import build_progress, snapshot_from_response
 from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
@@ -710,7 +711,7 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
 
     metric_evidence_payload = serialize_evidence_collection(evidence_collection)
 
-    return AuthorityV2Response(
+    response = AuthorityV2Response(
         request=RequestMetadata(
             scenario=_map_scenario(request.context),
             prompt_id=_prompt_id(request),
@@ -733,4 +734,11 @@ def run_analysis(client: OpenAI, request: AnalyzeRequest) -> AuthorityV2Response
         report=report,
         coaching_engine=coaching_engine,
         uncertainty=uncertainty,
+    )
+    progress = build_progress(snapshot_from_response(response), [])
+    return response.model_copy(
+        update={
+            "progress": progress,
+            "report": report.model_copy(update={"progress": progress}),
+        }
     )
