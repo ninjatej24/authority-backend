@@ -1232,6 +1232,44 @@ class PipelineValidation(BaseModel):
     audit: PipelineAudit = Field(default_factory=PipelineAudit)
 
 
+# --- LLM polish ---
+
+
+class PolishedTextSection(BaseModel):
+    original_text: str | None = None
+    polished_text: str | None = None
+    status: Literal["polished", "fallback", "rejected", "omitted"] = "omitted"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class PolishedListItem(BaseModel):
+    item_id: str
+    original_text: str | None = None
+    polished_text: str | None = None
+    status: Literal["polished", "fallback", "rejected", "omitted"] = "omitted"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class PolishedAuthorityReport(BaseModel):
+    engine_version: str = "llm_polish_v1"
+    status: Literal["polished", "fallback", "partial", "disabled"] = "fallback"
+    model: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    mirror: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    diagnosis: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    perception_map: dict[str, PolishedTextSection] = Field(default_factory=dict)
+    hidden_cost: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    highest_leverage_fix: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    training_prescription: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    retest_plan: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    timeline: list[PolishedListItem] = Field(default_factory=list)
+    evidence: list[PolishedListItem] = Field(default_factory=list)
+    share_card: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    weekly_summary: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    progress_summary: PolishedTextSection = Field(default_factory=PolishedTextSection)
+    preserved_ids: dict[str, list[str]] = Field(default_factory=dict)
+
+
 
 # --- Top-level response ---
 
@@ -1262,6 +1300,7 @@ class AuthorityV2Response(BaseModel):
     progress: Progress = Field(default_factory=Progress)
     explainability: ExplainabilityBundle = Field(default_factory=ExplainabilityBundle)
     pipeline_validation: PipelineValidation = Field(default_factory=PipelineValidation)
+    polished_report: PolishedAuthorityReport = Field(default_factory=PolishedAuthorityReport)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
     safety: Safety = Field(default_factory=Safety)

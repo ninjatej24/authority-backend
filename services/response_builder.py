@@ -45,6 +45,7 @@ from services.inference_engine import (
     build_uncertainty,
 )
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
+from services.llm_polish import polish_authority_report
 from services.moment_intelligence import attach_coaching_relevance, build_moment_intelligence
 from services.psychological_inference import build_psychological_inference
 from services.progress_engine import ProgressSnapshot, build_progress, snapshot_from_response
@@ -771,6 +772,19 @@ def run_analysis(
             "report": report.model_copy(update={"progress": progress, "explainability": explainability}),
         }
     )
-    return final_response.model_copy(
-        update={"pipeline_validation": build_pipeline_validation(final_response)}
+    pipeline_validation = build_pipeline_validation(final_response)
+    validated_response = final_response.model_copy(
+        update={"pipeline_validation": pipeline_validation}
+    )
+    polished_report = polish_authority_report(
+        report=validated_response.report,
+        explainability=validated_response.explainability,
+        pipeline_validation=pipeline_validation,
+        progress=validated_response.progress,
+        moment_intelligence=validated_response.moment_intelligence,
+        coaching=validated_response.coaching_engine,
+        client=client,
+    )
+    return validated_response.model_copy(
+        update={"polished_report": polished_report}
     )
