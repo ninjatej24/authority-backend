@@ -12,6 +12,7 @@ try:
 
     WEBRTC_VAD_AVAILABLE = True
 except ImportError:
+    webrtcvad = None
     WEBRTC_VAD_AVAILABLE = False
 
 VAD_AGGRESSIVENESS = 2  # 0-3, 2 is balanced for speech analysis
@@ -440,7 +441,7 @@ def run_vad(
     speech_segments: list[tuple[int, int, bool]]
     backend: str
 
-    if WEBRTC_VAD_AVAILABLE:
+    if WEBRTC_VAD_AVAILABLE and webrtcvad is not None:
         try:
             vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
             raw_speech_segments = _collect_segments_webrtc(vad, pcm, sample_rate)

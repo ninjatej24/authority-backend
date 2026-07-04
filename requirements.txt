@@ -9,4 +9,3 @@ ffmpeg-python
 pydantic>=2.0
 pytest
 httpx
-webrtcvad

@@ -6,6 +6,7 @@ import wave
 import numpy as np
 import pytest
 
+import services.vad as vad_module
 from services.vad import SegmentType, SpeechSegment, VADResult, run_vad
 
 
@@ -57,6 +58,23 @@ def test_vad_with_silence():
     assert result.avg_pause_duration_ms == 0.0
     assert result.pause_frequency_per_minute == 0.0
     assert result.vad_backend == "empty_fallback"
+
+
+def test_vad_uses_energy_fallback_when_webrtcvad_missing(monkeypatch):
+    """Deployment should not require the compiled webrtcvad package."""
+    wav_bytes = _make_wav_bytes(duration_seconds=2.0)
+    samples = np.frombuffer(wav_bytes, dtype=np.int16)
+
+    monkeypatch.setattr(vad_module, "WEBRTC_VAD_AVAILABLE", False)
+    monkeypatch.setattr(vad_module, "webrtcvad", None)
+
+    result = run_vad(samples, 16000)
+
+    assert isinstance(result, VADResult)
+    assert result.vad_backend == "energy_fallback"
+    assert result.speech_ratio > 0
+    assert result.total_speech_duration_ms > 0
+    assert result.speech_segments
 
 
 def test_vad_empty_samples():
