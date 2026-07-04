@@ -146,6 +146,7 @@ def test_analyze_returns_valid_authority_v2(
     assert model.progress.comparison_available is False
     assert model.pipeline_validation.pipeline_version == "authority.v2.milestone12"
     assert model.pipeline_validation.audit.completed_stages
+    assert model.moment_intelligence.engine_version == "moment_intelligence_v1"
     assert model.recommendations.fastest_improvement_tip
     assert model.paywall.locked_modules
     assert model.safety.responsible_framing

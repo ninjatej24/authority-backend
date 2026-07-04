@@ -451,13 +451,57 @@ class PsychologicalInference(BaseModel):
 class Moment(BaseModel):
     moment_id: str
     type: str
+    priority: int = 0
     start_ms: int
     end_ms: int
     severity: Literal["highlight", "low", "medium", "high"]
     headline: str
     summary: str
+    listener_interpretation: str | None = None
+    why_it_matters: str | None = None
+    confidence: float = 0.0
+    supporting_metrics: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    supporting_dimension_scores: dict[str, float] = Field(default_factory=dict)
+    transcript_span: str | None = None
+    word_ids: list[str] = Field(default_factory=list)
+    scenario_relevance: float = 1.0
+    coaching_relevance: list[str] = Field(default_factory=list)
+    playback_available: bool = True
+    importance_score: float = 0.0
     dimension_impact: dict[str, float] = Field(default_factory=dict)
     preview_visible_free: bool = False
+
+
+class MomentDimensionSnapshot(BaseModel):
+    start_ms: int
+    end_ms: int
+    command: float = 0.0
+    clarity: float = 0.0
+    composure: float = 0.0
+    presence: float = 0.0
+    persuasion: float = 0.0
+    structure: float = 0.0
+    evidence_density: float = 0.0
+    confidence: float = 0.0
+    quality_weighting: float = 1.0
+
+
+class AuthorityArc(BaseModel):
+    authority_arc: str | None = None
+    arc_confidence: float = 0.0
+    major_turning_points: list[str] = Field(default_factory=list)
+
+
+class MomentIntelligence(BaseModel):
+    engine_version: str = "moment_intelligence_v1"
+    moments: list[Moment] = Field(default_factory=list)
+    dimension_evolution: list[MomentDimensionSnapshot] = Field(default_factory=list)
+    authority_arc: AuthorityArc = Field(default_factory=AuthorityArc)
+    top_premium_moments: list[str] = Field(default_factory=list)
+    top_free_moment: str | None = None
+    hidden_moments: list[str] = Field(default_factory=list)
+    suppressed_moments: list[str] = Field(default_factory=list)
 
 
 # --- Coaching ---
@@ -810,14 +854,23 @@ class ReportEvidenceCard(BaseModel):
 class ReportTimelineItem(BaseModel):
     moment_id: str
     type: str
+    priority: int = 0
     headline: str
     summary: str
     listener_interpretation: str
+    why_it_matters: str | None = None
     dimension_impact: dict[str, float] = Field(default_factory=dict)
     confidence: float
     start_ms: int
     end_ms: int
     evidence_ids: list[str] = Field(default_factory=list)
+    supporting_metrics: list[str] = Field(default_factory=list)
+    transcript_span: str | None = None
+    word_ids: list[str] = Field(default_factory=list)
+    scenario_relevance: float = 1.0
+    coaching_relevance: list[str] = Field(default_factory=list)
+    importance_score: float = 0.0
+    moment_group: str | None = None
     severity: Literal["highlight", "low", "medium", "high"]
     preview_visible_free: bool = False
 
@@ -926,6 +979,7 @@ class AuthorityReport(BaseModel):
     perception_map: ReportPerceptionMap | None = None
     evidence_chain: list[ReportEvidenceCard] = Field(default_factory=list)
     timeline: list[ReportTimelineItem] = Field(default_factory=list)
+    moment_intelligence: MomentIntelligence = Field(default_factory=MomentIntelligence)
     dimension_reports: dict[str, ReportDimensionReport] = Field(default_factory=dict)
     hidden_cost: ReportHiddenCost | None = None
     highest_leverage_fix: ReportHighestLeverageFix | None = None
@@ -1197,6 +1251,7 @@ class AuthorityV2Response(BaseModel):
     evidence: list[EvidenceItem]
     metric_evidence: MetricEvidenceBundle = Field(default_factory=MetricEvidenceBundle)
     moments: list[Moment]
+    moment_intelligence: MomentIntelligence = Field(default_factory=MomentIntelligence)
     recommendations: Recommendations
     drills: list[Drill]
     psychological_inference: PsychologicalInference = Field(

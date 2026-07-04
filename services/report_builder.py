@@ -10,6 +10,7 @@ from schemas import (
     EvidenceItem,
     Metrics,
     Moment,
+    MomentIntelligence,
     PsychologicalInference,
     Scores,
     Uncertainty,
@@ -73,6 +74,7 @@ def build_report(
     duration_ms: int,
     scenario: str,
     coaching_engine: CoachingEngine | None = None,
+    moment_intelligence: MomentIntelligence | None = None,
 ) -> AuthorityReport:
     """Build the deterministic report via the Milestone 7 report generator."""
     return build_generated_report(
@@ -87,4 +89,5 @@ def build_report(
         audio_quality=audio_quality,
         duration_ms=duration_ms,
         scenario=scenario,
+        moment_intelligence=moment_intelligence,
     )

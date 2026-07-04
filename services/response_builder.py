@@ -45,7 +45,7 @@ from services.inference_engine import (
     build_uncertainty,
 )
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
-from services.moments import build_moments
+from services.moment_intelligence import attach_coaching_relevance, build_moment_intelligence
 from services.psychological_inference import build_psychological_inference
 from services.progress_engine import ProgressSnapshot, build_progress, snapshot_from_response
 from services.pipeline_validator import build_pipeline_validation
@@ -599,14 +599,6 @@ def run_analysis(
         linguistic_dict,
     )
 
-    moments = build_moments(
-        transcription.transcript.words,
-        duration_ms,
-        acoustic.windows,
-        delivery_metrics,
-        linguistic_dict,
-    )
-
     uncertainty = build_uncertainty(
         audio_quality.usable,
         not text.strip(),
@@ -676,6 +668,18 @@ def run_analysis(
         scenario=_map_scenario(request.context),
         asr_confidence=transcription.transcript.overall_asr_confidence,
     )
+    moment_intelligence = build_moment_intelligence(
+        words=transcription.transcript.words,
+        duration_ms=duration_ms,
+        windows=acoustic.windows,
+        linguistic=linguistic,
+        evidence=evidence,
+        scores=scores,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        scenario=_map_scenario(request.context),
+    )
+    moments = moment_intelligence.moments
     diagnostic_reasoning = build_diagnostic_reasoning(
         metrics=metrics_payload,
         psychological_inference=psychological_inference,
@@ -698,6 +702,8 @@ def run_analysis(
         duration_ms=duration_ms,
         scenario=_map_scenario(request.context),
     )
+    moment_intelligence = attach_coaching_relevance(moment_intelligence, coaching_engine)
+    moments = moment_intelligence.moments
     report = build_report(
         scores=scores,
         metrics=metrics_payload,
@@ -710,6 +716,7 @@ def run_analysis(
         audio_quality=audio_quality,
         duration_ms=duration_ms,
         scenario=_map_scenario(request.context),
+        moment_intelligence=moment_intelligence,
     )
 
     recommendations = _deterministic_recommendations(coaching_engine)
@@ -734,6 +741,7 @@ def run_analysis(
         evidence=evidence,
         metric_evidence=MetricEvidenceBundle.model_validate(metric_evidence_payload),
         moments=moments,
+        moment_intelligence=moment_intelligence,
         recommendations=recommendations,
         drills=drills,
         psychological_inference=psychological_inference,

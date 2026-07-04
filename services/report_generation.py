@@ -10,6 +10,7 @@ from schemas import (
     EvidenceItem,
     Metrics,
     Moment,
+    MomentIntelligence,
     PsychologicalEvidenceSignal,
     PsychologicalInference,
     ReportAuthorityType,
@@ -376,24 +377,44 @@ def _timeline(moments: list[Moment], evidence_ids: list[str]) -> list[ReportTime
     items: list[ReportTimelineItem] = []
     for moment in moments:
         impact_values = list(moment.dimension_impact.values())
-        confidence = min(0.9, max(0.45, 0.62 + sum(abs(value) for value in impact_values[:3]) * 0.4))
+        confidence = moment.confidence or min(0.9, max(0.45, 0.62 + sum(abs(value) for value in impact_values[:3]) * 0.4))
+        moment_evidence = moment.supporting_evidence_ids or evidence_ids[:3]
         items.append(
             ReportTimelineItem(
                 moment_id=moment.moment_id,
                 type=moment.type,
+                priority=moment.priority,
                 headline=moment.headline,
                 summary=moment.summary,
-                listener_interpretation=_moment_interpretation(moment),
+                listener_interpretation=moment.listener_interpretation or _moment_interpretation(moment),
+                why_it_matters=moment.why_it_matters,
                 dimension_impact=moment.dimension_impact,
                 confidence=round(confidence, 2),
                 start_ms=moment.start_ms,
                 end_ms=moment.end_ms,
-                evidence_ids=evidence_ids[:3],
+                evidence_ids=moment_evidence,
+                supporting_metrics=moment.supporting_metrics,
+                transcript_span=moment.transcript_span,
+                word_ids=moment.word_ids,
+                scenario_relevance=moment.scenario_relevance,
+                coaching_relevance=moment.coaching_relevance,
+                importance_score=moment.importance_score,
+                moment_group=_moment_group(moment.type),
                 severity=moment.severity,
                 preview_visible_free=moment.preview_visible_free,
             )
         )
     return items
+
+
+def _moment_group(moment_type: str) -> str:
+    if moment_type in {"strongest_moment", "high_presence_moment", "pause_ownership_moment", "strong_opening", "strong_closing", "best_sentence", "most_commanding_moment", "most_composed_moment", "most_persuasive_moment"}:
+        return "authority_peak"
+    if moment_type in {"confidence_drop", "weakest_moment", "rushing_moment", "filler_cluster", "hesitation_cluster", "monotone_stretch", "weak_opening", "weak_closing", "most_costly_sentence", "most_unstable_section"}:
+        return "attention_leak"
+    if moment_type in {"confidence_recovery", "most_improved_section"}:
+        return "recovery"
+    return "timeline_evidence"
 
 
 def _moment_interpretation(moment: Moment) -> str:
@@ -625,6 +646,7 @@ def build_generated_report(
     audio_quality: AudioQuality,
     duration_ms: int,
     scenario: str,
+    moment_intelligence: MomentIntelligence | None = None,
 ) -> AuthorityReport:
     profile = get_scenario_profile(scenario)
     confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
@@ -661,6 +683,7 @@ def build_generated_report(
         perception_map=perception_map,
         evidence_chain=evidence_cards,
         timeline=timeline,
+        moment_intelligence=moment_intelligence or MomentIntelligence(moments=moments),
         dimension_reports=dimension_reports,
         hidden_cost=hidden_cost,
         highest_leverage_fix=fix,
