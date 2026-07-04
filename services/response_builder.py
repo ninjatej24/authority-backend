@@ -18,6 +18,7 @@ from schemas import (
     RequestMetadata,
     RhythmMetrics,
     VADMetrics,
+    PersistenceStatus,
 )
 from services.acoustic_metrics import AcousticAnalysisResult, extract_acoustic_analysis
 from services.articulation import analyze_articulation
@@ -51,7 +52,13 @@ from services.moment_intelligence import attach_coaching_relevance, build_moment
 from services.psychological_inference import build_psychological_inference
 from services.progress_engine import ProgressSnapshot, build_progress, snapshot_from_response
 from services.pipeline_validator import build_pipeline_validation
-from services.persistence import DuplicateBenchmarkError, list_user_benchmarks, persist_analysis
+from services.persistence import (
+    DuplicateBenchmarkError,
+    DEFAULT_REPOSITORY,
+    MissingUserKeyError,
+    list_user_benchmarks,
+    persist_analysis,
+)
 from services.history_engine import build_history
 from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
@@ -71,6 +78,7 @@ class AnalyzeRequest:
     module_slug: str | None = None
     skill: str | None = None
     device_context: str | None = None
+    installation_id: str | None = None
     user_id: str | None = None
     language: str = "en"
 
@@ -735,6 +743,7 @@ def run_analysis(
             language=request.language,
             duration_ms=duration_ms,
             device_context=request.device_context,
+            installation_id=request.installation_id,
             user_id=request.user_id,
         ),
         audio_quality=audio_quality,
@@ -791,12 +800,47 @@ def run_analysis(
     completed_response = validated_response.model_copy(
         update={"polished_report": polished_report}
     )
+    persistence_status = PersistenceStatus(
+        persisted=False,
+        backend=getattr(DEFAULT_REPOSITORY, "backend", "unknown"),
+        user_key_present=bool(request.user_id or request.installation_id or request.device_context),
+    )
     try:
         persist_analysis(completed_response)
+        persistence_status = persistence_status.model_copy(
+            update={"persisted": True, "warnings": [], "audit_events": ["analysis_persisted"]}
+        )
+    except MissingUserKeyError:
+        persistence_status = persistence_status.model_copy(
+            update={
+                "persisted": False,
+                "user_key_present": False,
+                "warnings": ["History was not saved because no stable user_id or installation_id was provided"],
+                "audit_events": ["missing_user_key"],
+            }
+        )
     except DuplicateBenchmarkError:
-        pass
+        persistence_status = persistence_status.model_copy(
+            update={
+                "persisted": False,
+                "warnings": ["Analysis was already persisted; duplicate analysis_id was ignored"],
+                "audit_events": ["duplicate_analysis_id"],
+            }
+        )
+    except Exception:
+        persistence_status = persistence_status.model_copy(
+            update={
+                "persisted": False,
+                "warnings": ["Persistence unavailable; analysis completed without saving history"],
+                "audit_events": ["database_write_failure"],
+            }
+        )
     history = build_history(
-        list_user_benchmarks(completed_response.request.user_id),
+        list_user_benchmarks(
+            completed_response.request.user_id,
+            completed_response.request.installation_id,
+            completed_response.request.device_context,
+        ),
         user_id=completed_response.request.user_id,
     )
     dashboard_state = build_dashboard_state(history)
@@ -810,5 +854,6 @@ def run_analysis(
             "training_history": history.training_history,
             "scenario_history": history.scenario_history,
             "user_snapshot": history.user_profile,
+            "persistence_status": persistence_status,
         }
     )

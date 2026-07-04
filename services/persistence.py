@@ -5,9 +5,9 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Iterable
+from typing import Iterable, Protocol
 
-from schemas import AuthorityBenchmark, AuthoritySnapshot, AuthorityV2Response
+from schemas import AuthorityBenchmark, AuthoritySnapshot, AuthorityV2Response, PersistenceStatus
 
 
 def _parse_time(value: str | None) -> datetime:
@@ -19,16 +19,35 @@ def _parse_time(value: str | None) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def user_key(user_id: str | None) -> str:
-    return user_id or "anonymous"
+class MissingUserKeyError(ValueError):
+    """Raised when no stable user or installation key is available."""
+
+
+def resolve_user_key(user_id: str | None = None, installation_id: str | None = None, device_context: str | None = None) -> str | None:
+    """Resolve a stable persistence key without creating a shared anonymous bucket."""
+    for value in (user_id, installation_id, device_context):
+        normalized = (value or "").strip()
+        if normalized:
+            return normalized
+    return None
 
 
 class DuplicateBenchmarkError(ValueError):
     """Raised when a benchmark analysis_id is already stored for a user."""
 
 
+class AuthorityRepository(Protocol):
+    backend: str
+
+    def list_benchmarks(self, user_key: str | None, *, limit: int | None = None) -> list[AuthorityBenchmark]: ...
+
+    def persist(self, benchmark: AuthorityBenchmark) -> AuthorityBenchmark: ...
+
+
 class InMemoryAuthorityRepository:
     """Simple process-local repository used until a real database is wired in."""
+
+    backend = "memory"
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -38,13 +57,18 @@ class InMemoryAuthorityRepository:
         with self._lock:
             self._benchmarks.clear()
 
-    def list_benchmarks(self, user_id: str | None) -> list[AuthorityBenchmark]:
+    def list_benchmarks(self, user_key_value: str | None, *, limit: int | None = None) -> list[AuthorityBenchmark]:
+        if not user_key_value:
+            return []
         with self._lock:
-            items = deepcopy(self._benchmarks.get(user_key(user_id), []))
-        return sorted(items, key=lambda item: _parse_time(item.snapshot.created_at))
+            items = deepcopy(self._benchmarks.get(user_key_value, []))
+        ordered = sorted(items, key=lambda item: _parse_time(item.snapshot.created_at))
+        return ordered[-limit:] if limit else ordered
 
     def persist(self, benchmark: AuthorityBenchmark) -> AuthorityBenchmark:
-        key = user_key(benchmark.snapshot.user_id)
+        key = benchmark.snapshot.user_id
+        if not key:
+            raise MissingUserKeyError("missing_stable_user_key")
         with self._lock:
             existing = self._benchmarks.setdefault(key, [])
             if any(item.snapshot.analysis_id == benchmark.snapshot.analysis_id for item in existing):
@@ -53,10 +77,69 @@ class InMemoryAuthorityRepository:
         return benchmark
 
 
-DEFAULT_REPOSITORY = InMemoryAuthorityRepository()
+class _DefaultRepositoryProxy:
+    def __init__(self) -> None:
+        self._repo = None
+
+    @property
+    def backend(self) -> str:
+        return getattr(self._get(), "backend", "unknown")
+
+    def _get(self):
+        if self._repo is None:
+            try:
+                from services.database import build_repository
+
+                self._repo = build_repository()
+            except Exception:
+                self._repo = InMemoryAuthorityRepository()
+        return self._repo
+
+    def clear(self) -> None:
+        repo = self._get()
+        if hasattr(repo, "clear"):
+            repo.clear()
+
+    def persist(self, benchmark: AuthorityBenchmark) -> AuthorityBenchmark:
+        return self._get().persist(benchmark)
+
+    def list_benchmarks(self, user_key_value: str | None, *, limit: int | None = None) -> list[AuthorityBenchmark]:
+        return self._get().list_benchmarks(user_key_value, limit=limit)
+
+    def get_benchmark(self, analysis_id: str, user_key_value: str):
+        repo = self._get()
+        return repo.get_benchmark(analysis_id, user_key_value) if hasattr(repo, "get_benchmark") else next((item for item in repo.list_benchmarks(user_key_value) if item.snapshot.analysis_id == analysis_id), None)
+
+    def record_drill_completion(self, **kwargs):
+        repo = self._get()
+        if hasattr(repo, "record_drill_completion"):
+            return repo.record_drill_completion(**kwargs)
+        return {"user_key": kwargs.get("user_key"), "drill_id": kwargs.get("drill_id")}
+
+    def record_scenario_session(self, **kwargs):
+        repo = self._get()
+        if hasattr(repo, "record_scenario_session"):
+            return repo.record_scenario_session(**kwargs)
+        return {"user_key": kwargs.get("user_key"), "scenario": kwargs.get("scenario")}
+
+    def record_retest_event(self, **kwargs):
+        repo = self._get()
+        if hasattr(repo, "record_retest_event"):
+            return repo.record_retest_event(**kwargs)
+        return {"user_key": kwargs.get("user_key")}
+
+
+DEFAULT_REPOSITORY = _DefaultRepositoryProxy()
 
 
 def snapshot_from_authority_response(response: AuthorityV2Response) -> AuthoritySnapshot:
+    key = resolve_user_key(
+        response.request.user_id,
+        response.request.installation_id,
+        response.request.device_context,
+    )
+    if not key:
+        raise MissingUserKeyError("missing_stable_user_key")
     primary = response.coaching_engine.selected_interventions.primary_drill
     queue = response.coaching_engine.future_training_queue
     report_type = response.report.authority_type.label if response.report.authority_type else None
@@ -67,7 +150,7 @@ def snapshot_from_authority_response(response: AuthorityV2Response) -> Authority
     )
     return AuthoritySnapshot(
         analysis_id=response.analysis_id,
-        user_id=response.request.user_id,
+        user_id=key,
         created_at=response.created_at,
         scenario=response.request.scenario,
         authority_score=response.scores.authority_score,
@@ -87,10 +170,12 @@ def benchmark_from_response(response: AuthorityV2Response) -> AuthorityBenchmark
     report = response.report
     return AuthorityBenchmark(
         snapshot=snapshot_from_authority_response(response),
+        full_response=response.model_dump(),
         report=report.model_dump(),
         progress=response.progress.model_dump(),
         coaching=response.coaching_engine.model_dump(),
         moment_intelligence=response.moment_intelligence.model_dump(),
+        explainability=response.explainability.model_dump(),
         timeline=[item.model_dump() for item in report.timeline],
         share_card=report.share_card.model_dump() if report.share_card else {},
         validation=response.pipeline_validation.model_dump(),
@@ -103,7 +188,7 @@ def benchmark_from_response(response: AuthorityV2Response) -> AuthorityBenchmark
 def persist_analysis(
     response: AuthorityV2Response,
     *,
-    repository: InMemoryAuthorityRepository | None = None,
+    repository: AuthorityRepository | None = None,
 ) -> AuthorityBenchmark:
     """Persist a completed benchmark exactly as produced by the pipeline."""
     repo = repository or DEFAULT_REPOSITORY
@@ -113,11 +198,24 @@ def persist_analysis(
 
 def list_user_benchmarks(
     user_id: str | None,
+    installation_id: str | None = None,
+    device_context: str | None = None,
     *,
-    repository: InMemoryAuthorityRepository | None = None,
+    repository: AuthorityRepository | None = None,
+    limit: int | None = None,
 ) -> list[AuthorityBenchmark]:
     repo = repository or DEFAULT_REPOSITORY
-    return repo.list_benchmarks(user_id)
+    key = resolve_user_key(user_id, installation_id, device_context)
+    return repo.list_benchmarks(key, limit=limit) if key else []
+
+
+def persistence_status_for_missing_key() -> PersistenceStatus:
+    return PersistenceStatus(
+        persisted=False,
+        user_key_present=False,
+        warnings=["History was not saved because no stable user_id or installation_id was provided"],
+        audit_events=["missing_user_key"],
+    )
 
 
 def validate_history_integrity(benchmarks: Iterable[AuthorityBenchmark]) -> dict:

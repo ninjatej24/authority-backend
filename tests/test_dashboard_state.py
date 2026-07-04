@@ -80,7 +80,7 @@ def test_endpoint_attaches_history_and_dashboard_outputs(
     response = TestClient(app).post(
         "/analyze",
         files={"file": ("sample.wav", _make_wav_bytes(), "audio/wav")},
-        data={"context": "benchmark", "title": "Test", "prompt": "Tell me about leadership"},
+        data={"context": "benchmark", "title": "Test", "prompt": "Tell me about leadership", "installation_id": "install-dashboard"},
     )
 
     assert response.status_code == 200

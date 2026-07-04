@@ -18,6 +18,7 @@ class RequestMetadata(BaseModel):
     language: str = "en"
     duration_ms: int = 0
     device_context: str | None = None
+    installation_id: str | None = None
     user_id: str | None = None
 
 
@@ -1299,10 +1300,12 @@ class AuthoritySnapshot(BaseModel):
 
 class AuthorityBenchmark(BaseModel):
     snapshot: AuthoritySnapshot
+    full_response: dict[str, Any] = Field(default_factory=dict)
     report: dict[str, Any] = Field(default_factory=dict)
     progress: dict[str, Any] = Field(default_factory=dict)
     coaching: dict[str, Any] = Field(default_factory=dict)
     moment_intelligence: dict[str, Any] = Field(default_factory=dict)
+    explainability: dict[str, Any] = Field(default_factory=dict)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     share_card: dict[str, Any] = Field(default_factory=dict)
     validation: dict[str, Any] = Field(default_factory=dict)
@@ -1446,6 +1449,15 @@ class DashboardState(BaseModel):
     authority_snapshot: AuthoritySnapshot | None = None
 
 
+class PersistenceStatus(BaseModel):
+    enabled: bool = True
+    persisted: bool = False
+    backend: str = "memory"
+    user_key_present: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    audit_events: list[str] = Field(default_factory=list)
+
+
 # --- Top-level response ---
 
 
@@ -1484,6 +1496,7 @@ class AuthorityV2Response(BaseModel):
     training_history: TrainingHistory = Field(default_factory=TrainingHistory)
     scenario_history: ScenarioHistory = Field(default_factory=ScenarioHistory)
     user_snapshot: UserProfile = Field(default_factory=UserProfile)
+    persistence_status: PersistenceStatus = Field(default_factory=PersistenceStatus)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
     safety: Safety = Field(default_factory=Safety)
