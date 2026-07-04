@@ -25,6 +25,7 @@ from services.audio_preprocessing import preprocess_audio
 from services.derived_indices import calculate_derived_indices
 from services.diagnostic_reasoning import build_diagnostic_reasoning
 from services.deterministic_coaching import build_deterministic_coaching
+from services.dashboard_state import build_dashboard_state
 from services.evidence import (
     EvidenceCollection,
     add_articulation_evidence,
@@ -50,6 +51,8 @@ from services.moment_intelligence import attach_coaching_relevance, build_moment
 from services.psychological_inference import build_psychological_inference
 from services.progress_engine import ProgressSnapshot, build_progress, snapshot_from_response
 from services.pipeline_validator import build_pipeline_validation
+from services.persistence import DuplicateBenchmarkError, list_user_benchmarks, persist_analysis
+from services.history_engine import build_history
 from services.report_builder import build_report
 from services.rhythm_analysis import analyze_rhythm
 from services.scoring_engine import compute_authority_score
@@ -785,6 +788,27 @@ def run_analysis(
         coaching=validated_response.coaching_engine,
         client=client,
     )
-    return validated_response.model_copy(
+    completed_response = validated_response.model_copy(
         update={"polished_report": polished_report}
+    )
+    try:
+        persist_analysis(completed_response)
+    except DuplicateBenchmarkError:
+        pass
+    history = build_history(
+        list_user_benchmarks(completed_response.request.user_id),
+        user_id=completed_response.request.user_id,
+    )
+    dashboard_state = build_dashboard_state(history)
+    return completed_response.model_copy(
+        update={
+            "dashboard_state": dashboard_state,
+            "history_summary": history.history_summary,
+            "authority_journey": history.authority_journey,
+            "weekly_summary": history.weekly_summary,
+            "monthly_summary": history.monthly_summary,
+            "training_history": history.training_history,
+            "scenario_history": history.scenario_history,
+            "user_snapshot": history.user_profile,
+        }
     )

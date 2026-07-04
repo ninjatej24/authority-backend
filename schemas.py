@@ -1270,6 +1270,181 @@ class PolishedAuthorityReport(BaseModel):
     preserved_ids: dict[str, list[str]] = Field(default_factory=dict)
 
 
+# --- Persistence and longitudinal history ---
+
+
+class UserProfile(BaseModel):
+    user_id: str | None = None
+    created_at: str | None = None
+    latest_analysis_id: str | None = None
+    benchmark_count: int = 0
+
+
+class AuthoritySnapshot(BaseModel):
+    analysis_id: str
+    user_id: str | None = None
+    created_at: str
+    scenario: str = "benchmark"
+    authority_score: int = 0
+    dimension_scores: dict[str, int] = Field(default_factory=dict)
+    derived_axes: dict[str, int] = Field(default_factory=dict)
+    authority_type: str | None = None
+    confidence: float = 0.0
+    audio_usable: bool = True
+    primary_drill_id: str | None = None
+    future_drill_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    moment_ids: list[str] = Field(default_factory=list)
+
+
+class AuthorityBenchmark(BaseModel):
+    snapshot: AuthoritySnapshot
+    report: dict[str, Any] = Field(default_factory=dict)
+    progress: dict[str, Any] = Field(default_factory=dict)
+    coaching: dict[str, Any] = Field(default_factory=dict)
+    moment_intelligence: dict[str, Any] = Field(default_factory=dict)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    share_card: dict[str, Any] = Field(default_factory=dict)
+    validation: dict[str, Any] = Field(default_factory=dict)
+    polished_report: dict[str, Any] = Field(default_factory=dict)
+    audio_quality: dict[str, Any] = Field(default_factory=dict)
+    technical_appendix: dict[str, Any] = Field(default_factory=dict)
+
+
+class DrillCompletion(BaseModel):
+    drill_id: str
+    status: Literal["started", "completed", "abandoned"] = "started"
+    completed_at: str | None = None
+    duration_min: int = 0
+    source_analysis_id: str | None = None
+
+
+class TrainingHistory(BaseModel):
+    completed_drills: list[DrillCompletion] = Field(default_factory=list)
+    started_drills: list[DrillCompletion] = Field(default_factory=list)
+    abandoned_drills: list[DrillCompletion] = Field(default_factory=list)
+    practice_duration_min: int = 0
+    last_completed_drill: str | None = None
+    completion_streak: int = 0
+    current_focus: str | None = None
+    training_progression: list[str] = Field(default_factory=list)
+    dependency_completion: dict[str, bool] = Field(default_factory=dict)
+
+
+class ScenarioHistory(BaseModel):
+    scenario_counts: dict[str, int] = Field(default_factory=dict)
+    scenario_best_scores: dict[str, int] = Field(default_factory=dict)
+    scenario_improvement: dict[str, float] = Field(default_factory=dict)
+    best_scenario: str | None = None
+    weakest_scenario: str | None = None
+    most_practised: str | None = None
+    least_practised: str | None = None
+    scenario_confidence: dict[str, float] = Field(default_factory=dict)
+
+
+class RetestHistory(BaseModel):
+    baseline_benchmark_id: str | None = None
+    best_comparison_benchmark_id: str | None = None
+    recommended_comparison_benchmark_id: str | None = None
+    comparison_confidence: float = 0.0
+    comparison_eligibility: bool = False
+    comparison_exclusions: list[str] = Field(default_factory=list)
+    cross_scenario_restriction: bool = True
+    same_prompt_recommendation: bool = True
+
+
+class LongitudinalSummary(BaseModel):
+    current_authority: int | None = None
+    previous_authority: int | None = None
+    best_authority: int | None = None
+    rolling_average: float | None = None
+    rolling_30_day_average: float | None = None
+    rolling_90_day_average: float | None = None
+    rolling_dimension_averages: dict[str, float] = Field(default_factory=dict)
+    highest_ever_command: int | None = None
+    highest_ever_presence: int | None = None
+    most_improved_dimension: str | None = None
+    most_stagnant_dimension: str | None = None
+    consistency: float = 0.0
+    volatility: float = 0.0
+    trend_direction: Literal["improving", "stable", "declining", "insufficient_history"] = "insufficient_history"
+    training_adherence: float = 0.0
+    benchmark_count: int = 0
+    drill_count: int = 0
+    scenario_count: int = 0
+    practice_streak: int = 0
+    days_since_benchmark: int | None = None
+    days_since_drill: int | None = None
+    days_since_practice: int | None = None
+    last_scenario: str | None = None
+    favourite_scenario: str | None = None
+
+
+class WeeklyHistorySummary(BaseModel):
+    weekly_improvement: float = 0.0
+    weekly_regression: float = 0.0
+    weekly_consistency: float = 0.0
+    new_milestone: str | None = None
+    recommended_focus: str | None = None
+    drill_completion_summary: dict[str, int] = Field(default_factory=dict)
+    practice_summary: str | None = None
+
+
+class MonthlyHistorySummary(BaseModel):
+    monthly_improvement: float = 0.0
+    monthly_consistency: float = 0.0
+    best_monthly_score: int | None = None
+    recommended_focus: str | None = None
+    benchmark_count: int = 0
+
+
+class AuthorityJourney(BaseModel):
+    stage: Literal[
+        "Beginning",
+        "Building Consistency",
+        "Finding Command",
+        "Developing Presence",
+        "Authority Emerging",
+        "Established Authority",
+    ] = "Beginning"
+    authority_journey: str | None = None
+    identity_evolution: str | None = None
+    communication_trajectory: Literal["improving", "stable", "declining", "insufficient_history"] = "insufficient_history"
+    emerging_strengths: list[str] = Field(default_factory=list)
+    persistent_weaknesses: list[str] = Field(default_factory=list)
+    behaviour_stabilisation: float = 0.0
+    recurring_collapse_pattern: str | None = None
+    recurring_strength_pattern: str | None = None
+    improvement_velocity: float = 0.0
+    plateau_detected: bool = False
+
+
+class AuthorityHistory(BaseModel):
+    user_profile: UserProfile = Field(default_factory=UserProfile)
+    benchmarks: list[AuthorityBenchmark] = Field(default_factory=list)
+    history_summary: LongitudinalSummary = Field(default_factory=LongitudinalSummary)
+    training_history: TrainingHistory = Field(default_factory=TrainingHistory)
+    scenario_history: ScenarioHistory = Field(default_factory=ScenarioHistory)
+    retest_history: RetestHistory = Field(default_factory=RetestHistory)
+    weekly_summary: WeeklyHistorySummary = Field(default_factory=WeeklyHistorySummary)
+    monthly_summary: MonthlyHistorySummary = Field(default_factory=MonthlyHistorySummary)
+    authority_journey: AuthorityJourney = Field(default_factory=AuthorityJourney)
+    validation: dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardState(BaseModel):
+    today_mission: str | None = None
+    highest_leverage_drill: str | None = None
+    active_training_stage: str | None = None
+    momentum: Literal["new_baseline", "improving", "steady", "declining"] = "new_baseline"
+    next_retest: dict[str, Any] = Field(default_factory=dict)
+    growth_signal: str | None = None
+    practice_recommendation: str | None = None
+    training_queue: list[str] = Field(default_factory=list)
+    weekly_summary: WeeklyHistorySummary = Field(default_factory=WeeklyHistorySummary)
+    identity_summary: str | None = None
+    authority_snapshot: AuthoritySnapshot | None = None
+
 
 # --- Top-level response ---
 
@@ -1301,6 +1476,14 @@ class AuthorityV2Response(BaseModel):
     explainability: ExplainabilityBundle = Field(default_factory=ExplainabilityBundle)
     pipeline_validation: PipelineValidation = Field(default_factory=PipelineValidation)
     polished_report: PolishedAuthorityReport = Field(default_factory=PolishedAuthorityReport)
+    dashboard_state: DashboardState = Field(default_factory=DashboardState)
+    history_summary: LongitudinalSummary = Field(default_factory=LongitudinalSummary)
+    authority_journey: AuthorityJourney = Field(default_factory=AuthorityJourney)
+    weekly_summary: WeeklyHistorySummary = Field(default_factory=WeeklyHistorySummary)
+    monthly_summary: MonthlyHistorySummary = Field(default_factory=MonthlyHistorySummary)
+    training_history: TrainingHistory = Field(default_factory=TrainingHistory)
+    scenario_history: ScenarioHistory = Field(default_factory=ScenarioHistory)
+    user_snapshot: UserProfile = Field(default_factory=UserProfile)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
     safety: Safety = Field(default_factory=Safety)
