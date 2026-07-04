@@ -1458,6 +1458,187 @@ class PersistenceStatus(BaseModel):
     audit_events: list[str] = Field(default_factory=list)
 
 
+# --- Analytics, calibration and feedback preparation ---
+
+
+class AnalyticsEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    event_type: str
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    analysis_id: str | None = None
+    user_key_present: bool = False
+    scenario: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalysisAnalytics(BaseModel):
+    analysis_id: str | None = None
+    timestamp: str | None = None
+    scenario: str = "benchmark"
+    duration_ms: int = 0
+    authority_score: int | None = None
+    score_band: str | None = None
+    confidence: float | None = None
+    authority_type: str | None = None
+    dimension_scores: dict[str, int] = Field(default_factory=dict)
+    penalties: dict[str, float] = Field(default_factory=dict)
+    bonuses: dict[str, float] = Field(default_factory=dict)
+    audio_quality: dict[str, Any] = Field(default_factory=dict)
+    uncertainty_reasons: list[str] = Field(default_factory=list)
+    validation_integrity: float | None = None
+    explainability_integrity: float | None = None
+
+
+class CoachingAnalytics(BaseModel):
+    selected_drill_id: str | None = None
+    selected_intervention_id: str | None = None
+    highest_leverage_issue: str | None = None
+    targeted_dimensions: list[str] = Field(default_factory=list)
+    expected_improvement: dict[str, float] = Field(default_factory=dict)
+    drill_priority: float | None = None
+    dependency_graph_ids: list[str] = Field(default_factory=list)
+
+
+class ProgressAnalytics(BaseModel):
+    score_delta: float | None = None
+    dimension_deltas: dict[str, float] = Field(default_factory=dict)
+    authority_evolution: dict[str, Any] = Field(default_factory=dict)
+    milestones_earned: list[str] = Field(default_factory=list)
+    regressions: list[str] = Field(default_factory=list)
+    coaching_evolution: dict[str, Any] = Field(default_factory=dict)
+    retest_recommendation: dict[str, Any] = Field(default_factory=dict)
+    trend_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class TimelineAnalytics(BaseModel):
+    strongest_moment_count: int = 0
+    weakest_moment_count: int = 0
+    confidence_drop_count: int = 0
+    rushing_event_count: int = 0
+    hesitation_cluster_count: int = 0
+    filler_cluster_count: int = 0
+    monotone_stretch_count: int = 0
+    pause_ownership_moment_count: int = 0
+    decisive_moment_count: int = 0
+    total_moment_count: int = 0
+
+
+class RetentionSummary(BaseModel):
+    days_since_benchmark: int | None = None
+    days_since_drill: int | None = None
+    days_since_retest: int | None = None
+    weekly_activity: int = 0
+    monthly_activity: int = 0
+    streak: int = 0
+    drop_off_risk_inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProductMetrics(BaseModel):
+    benchmark_completion: bool = False
+    premium_unlock_available: bool = False
+    report_completion: bool = False
+    average_drill_completion: float = 0.0
+    retest_frequency: float = 0.0
+    share_frequency: float = 0.0
+    history_length: int = 0
+    average_improvement: float | None = None
+    average_confidence: float | None = None
+    average_quality: float | None = None
+
+
+class CalibrationRecord(BaseModel):
+    record_id: str = Field(default_factory=lambda: str(uuid4()))
+    analysis_id: str | None = None
+    created_at: str | None = None
+    authority_score: int | None = None
+    score_band: str | None = None
+    dimension_scores: dict[str, int] = Field(default_factory=dict)
+    scenario: str = "benchmark"
+    confidence: float | None = None
+    authority_type: str | None = None
+    audio_quality: dict[str, Any] = Field(default_factory=dict)
+    validation_integrity: float | None = None
+    explainability_integrity: float | None = None
+    moment_counts: dict[str, int] = Field(default_factory=dict)
+    coaching_id: str | None = None
+    progress_outcome: str | None = None
+    immutable_snapshot: bool = True
+
+
+class FairnessAuditRecord(BaseModel):
+    analysis_id: str | None = None
+    audio_quality: dict[str, Any] = Field(default_factory=dict)
+    confidence: float | None = None
+    scenario: str = "benchmark"
+    language: str = "en"
+    asr_confidence: float | None = None
+    quality_suppression: list[str] = Field(default_factory=list)
+    fairness_flags: list[str] = Field(default_factory=list)
+    demographic_inference_included: bool = False
+    protected_characteristics_included: bool = False
+
+
+class SubjectiveAccuracyFeedback(BaseModel):
+    rating: int | None = None
+    free_text: str | None = None
+    timestamp: str | None = None
+    analysis_id: str | None = None
+    report_version: str = "authority_report_v1"
+    schema_version: str = "authority.v2.analytics"
+
+
+class ReportFeedback(SubjectiveAccuracyFeedback):
+    section_id: str | None = None
+
+
+class DrillFeedback(SubjectiveAccuracyFeedback):
+    drill_id: str | None = None
+
+
+class RetestFeedback(SubjectiveAccuracyFeedback):
+    baseline_analysis_id: str | None = None
+    retest_analysis_id: str | None = None
+
+
+class GeneralFeedback(SubjectiveAccuracyFeedback):
+    feedback_type: str = "general"
+
+
+class FeedbackBundle(BaseModel):
+    subjective_accuracy: list[SubjectiveAccuracyFeedback] = Field(default_factory=list)
+    report_feedback: list[ReportFeedback] = Field(default_factory=list)
+    drill_feedback: list[DrillFeedback] = Field(default_factory=list)
+    retest_feedback: list[RetestFeedback] = Field(default_factory=list)
+    general_feedback: list[GeneralFeedback] = Field(default_factory=list)
+
+
+class AnalyticsSummary(BaseModel):
+    analytics_version: str = "analytics_v1"
+    collected_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    privacy_mode: str = "metadata_only"
+    sensitive_text_excluded: bool = True
+    deterministic: bool = True
+    notes: list[str] = Field(default_factory=list)
+
+
+class AnalyticsBundle(BaseModel):
+    summary: AnalyticsSummary = Field(default_factory=AnalyticsSummary)
+    analysis: AnalysisAnalytics = Field(default_factory=AnalysisAnalytics)
+    coaching: CoachingAnalytics = Field(default_factory=CoachingAnalytics)
+    progress: ProgressAnalytics = Field(default_factory=ProgressAnalytics)
+    timeline: TimelineAnalytics = Field(default_factory=TimelineAnalytics)
+    retention: RetentionSummary = Field(default_factory=RetentionSummary)
+    product_metrics: ProductMetrics = Field(default_factory=ProductMetrics)
+    calibration_record: CalibrationRecord = Field(default_factory=CalibrationRecord)
+    fairness_audit: FairnessAuditRecord = Field(default_factory=FairnessAuditRecord)
+    user_behaviour_events: list[AnalyticsEvent] = Field(default_factory=list)
+    feedback: FeedbackBundle = Field(default_factory=FeedbackBundle)
+
+
 # --- Top-level response ---
 
 
@@ -1497,6 +1678,7 @@ class AuthorityV2Response(BaseModel):
     scenario_history: ScenarioHistory = Field(default_factory=ScenarioHistory)
     user_snapshot: UserProfile = Field(default_factory=UserProfile)
     persistence_status: PersistenceStatus = Field(default_factory=PersistenceStatus)
+    analytics: AnalyticsBundle = Field(default_factory=AnalyticsBundle)
     paywall: Paywall = Field(default_factory=Paywall)
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)
     safety: Safety = Field(default_factory=Safety)

@@ -21,6 +21,7 @@ from schemas import (
     PersistenceStatus,
 )
 from services.acoustic_metrics import AcousticAnalysisResult, extract_acoustic_analysis
+from services.analytics_engine import build_analytics_bundle
 from services.articulation import analyze_articulation
 from services.audio_preprocessing import preprocess_audio
 from services.derived_indices import calculate_derived_indices
@@ -844,7 +845,7 @@ def run_analysis(
         user_id=completed_response.request.user_id,
     )
     dashboard_state = build_dashboard_state(history)
-    return completed_response.model_copy(
+    response_with_history = completed_response.model_copy(
         update={
             "dashboard_state": dashboard_state,
             "history_summary": history.history_summary,
@@ -857,3 +858,5 @@ def run_analysis(
             "persistence_status": persistence_status,
         }
     )
+    analytics = build_analytics_bundle(response_with_history)
+    return response_with_history.model_copy(update={"analytics": analytics})
