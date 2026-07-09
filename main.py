@@ -18,13 +18,36 @@ from services.response_builder import AnalyzeRequest, run_analysis
 
 load_dotenv()
 
+MAX_UPLOAD_BYTES = int(os.getenv("AUTHORITY_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+ALLOWED_AUDIO_MIME_TYPES = {
+    "audio/aac",
+    "audio/m4a",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "audio/webm",
+    "application/octet-stream",
+}
+
 
 def _get_client() -> OpenAI:
     """Lazy-create OpenAI client only when needed."""
-    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+    return OpenAI(api_key=api_key)
 
 
 app = FastAPI()
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
+    }
 
 
 @app.post("/analyze")
@@ -42,9 +65,17 @@ async def analyze_voice(
     x_installation_id: str | None = Header(None),
 ):
     suffix = os.path.splitext(file.filename)[1] if file.filename else ".m4a"
+    if file.content_type and file.content_type.lower() not in ALLOWED_AUDIO_MIME_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported upload MIME type")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
+    if len(payload) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded audio file is too large")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
+        tmp.write(payload)
         tmp_path = tmp.name
 
     request = AnalyzeRequest(
@@ -60,8 +91,16 @@ async def analyze_voice(
         installation_id=installation_id or x_installation_id,
     )
 
-    response = run_analysis(_get_client(), request)
-    return response.model_dump()
+    try:
+        response = run_analysis(_get_client(), request)
+        return response.model_dump()
+    finally:
+        for path in (tmp_path, f"{os.path.splitext(tmp_path)[0]}.processed.wav"):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
 
 def _stable_key(

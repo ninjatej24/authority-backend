@@ -5,6 +5,11 @@ from __future__ import annotations
 from schemas import AudioQuality, Uncertainty
 from services.deterministic_coaching import build_deterministic_coaching
 from services.report_builder import build_report
+from services.report_generation import (
+    _behaviour_observations,
+    _diagnosis_observations,
+    _select_behaviour_diagnosis,
+)
 from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
 from tests.test_psychological_inference import _infer, _metrics, _scores
 from tests.test_report_builder import _evidence, _moments
@@ -333,6 +338,13 @@ def test_user_facing_copy_has_no_internal_ids_or_generic_placeholders():
 
     forbidden = [
         "weak_finality_reduces_perceived_leadership",
+        "winning diagnosis",
+        "supported by 1 evidence item",
+        "supported by 2 evidence item",
+        "supported by 3 evidence item",
+        "supported by 4 evidence item",
+        "supported by 5 evidence item",
+        "contradicted by",
         "selected focus",
         "target area",
         "deterministic",
@@ -354,6 +366,46 @@ def test_report_organizes_around_one_dominant_diagnosis():
     assert diagnosis in report.training_prescription.why_chosen.lower()
 
 
+def test_selected_diagnosis_is_stable_after_evidence_trimming():
+    scores = _softened_expert_scores()
+    metrics = _metrics()
+    audio_quality = AudioQuality(usable=True, background_noise_level="low")
+    uncertainty = Uncertainty(overall_confidence_label="medium_high", reasons=[])
+    duration_ms = 60000
+    evidence = _evidence()
+    moments = _moments()
+    inference = _infer(metrics, audio_quality=audio_quality, duration_ms=duration_ms)
+    diagnostic = _diagnostic(
+        scores=scores,
+        metrics=metrics,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario="benchmark",
+        inference=inference,
+        evidence=evidence,
+        moments=moments,
+    )
+    coaching = build_deterministic_coaching(
+        metrics=metrics,
+        scores=scores,
+        psychological_inference=inference,
+        diagnostic_reasoning=diagnostic,
+        report=None,
+        audio_quality=audio_quality,
+        uncertainty=uncertainty,
+        duration_ms=duration_ms,
+        scenario="benchmark",
+    )
+    confidence = min(inference.overall_inference_confidence, scores.score_confidence or 0.0)
+    observations = _behaviour_observations(evidence, inference, diagnostic, coaching, moments, confidence, duration_ms, audio_quality)
+    diagnosis = _select_behaviour_diagnosis(observations, confidence, duration_ms, audio_quality, coaching)
+    trimmed = _diagnosis_observations(observations, diagnosis)
+
+    assert diagnosis is not None
+    assert _select_behaviour_diagnosis(trimmed, confidence, duration_ms, audio_quality, coaching).id == diagnosis.id
+
+
 def test_evidence_and_timeline_are_filtered_to_winning_story():
     report = _generated_report()
     dimensions = {item.related_dimension for item in report.evidence_chain}
@@ -362,6 +414,53 @@ def test_evidence_and_timeline_are_filtered_to_winning_story():
     assert len(report.evidence_chain) <= 5
     assert all(item.evidence_ids for item in report.timeline)
     assert all(set(item.evidence_ids).issubset({card.evidence_id for card in report.evidence_chain}) for item in report.timeline)
+
+
+def test_evidence_cards_support_report_diagnosis_or_clarify_uncertainty():
+    report = _generated_report()
+    diagnosis_ids = set(report.diagnosis.evidence_ids)
+
+    assert diagnosis_ids
+    assert diagnosis_ids.issubset({item.evidence_id for item in report.evidence_chain})
+    assert all(item.evidence_id in diagnosis_ids or item.direction != "negative" for item in report.evidence_chain)
+
+
+def test_diagnostic_reasoning_and_report_diagnosis_do_not_conflict():
+    report = _generated_report()
+
+    assert report.primary_diagnosis is not None
+    assert report.primary_diagnosis.diagnosis_name == report.diagnosis.core_pattern
+    assert set(report.primary_diagnosis.supporting_evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
+
+
+def test_contradictions_reduce_confidence_instead_of_becoming_extra_unrelated_cards():
+    metrics = _metrics(
+        linguistic={"filler_words_per_min": 0.0, "opening_strength_score": 0.86, "structure_score": 0.82},
+        rhythm={"speed_up_segments": 3, "burst_speaking_segments": 2, "rhythm_consistency": 0.35},
+        raw={"words_per_minute": 195.0},
+    )
+    report = _generated_report(metrics=metrics)
+
+    assert report.mirror.confidence_label in {"low", "medium", "medium_high"}
+    assert len({item.related_dimension for item in report.evidence_chain}) <= 3
+    assert "filler burden" not in str([item.model_dump() for item in report.evidence_chain]).lower()
+
+
+def test_short_recording_suppresses_timeline_precision():
+    report = _generated_report(duration_ms=9000)
+
+    assert report.timeline == []
+
+
+def test_hidden_cost_fix_and_training_derive_from_selected_diagnosis():
+    report = _generated_report()
+    pattern = report.diagnosis.core_pattern.lower().rstrip(".")
+
+    assert pattern in report.hidden_cost.consequence.lower()
+    assert pattern in report.highest_leverage_fix.plain_english.lower()
+    assert pattern in report.training_prescription.why_chosen.lower()
+    assert report.training_prescription.instructions
+    assert report.training_prescription.action_step
 
 
 def test_competing_hypotheses_reduce_certainty_instead_of_disappearing():

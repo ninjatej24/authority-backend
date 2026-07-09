@@ -171,9 +171,10 @@ def test_report_generation_maps_reasoning_without_gpt_decisions():
         scenario="benchmark",
     )
 
-    assert report.primary_diagnosis == reasoning.primary_diagnosis
+    assert report.primary_diagnosis is not None
     assert report.diagnosis.core_behavioural_pattern
-    assert report.diagnosis.core_behavioural_pattern != reasoning.primary_diagnosis.diagnosis_id
+    assert report.primary_diagnosis.diagnosis_name == report.diagnosis.core_behavioural_pattern
+    assert set(report.primary_diagnosis.supporting_evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
     pattern = report.diagnosis.core_behavioural_pattern.lower().rstrip(".")
     assert pattern in report.mirror.headline.lower()
     assert pattern in report.highest_leverage_fix.plain_english.lower()

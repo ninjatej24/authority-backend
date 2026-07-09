@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -118,6 +119,64 @@ def test_history_endpoint_missing_user_key_degrades_gracefully():
     assert response.status_code == 200
     assert response.json()["warnings"]
     assert response.json()["history"]["history_summary"]["benchmark_count"] == 0
+
+
+def test_health_endpoint_reports_openai_configuration(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["openai_configured"] is True
+
+
+def test_missing_openai_api_key_returns_clear_error(monkeypatch):
+    from main import _get_client
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    try:
+        _get_client()
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 503
+        assert "OPENAI_API_KEY" in getattr(exc, "detail", "")
+    else:
+        raise AssertionError("Expected missing OPENAI_API_KEY to raise a clear service error")
+
+
+def test_analyze_rejects_unsupported_mime_type():
+    response = TestClient(app).post(
+        "/analyze",
+        files={"file": ("sample.txt", b"not audio", "text/plain")},
+        data={"context": "benchmark"},
+    )
+
+    assert response.status_code == 415
+
+
+@patch("services.coaching_engine._get_client")
+@patch("services.inference_engine._get_client")
+@patch("main._get_client")
+def test_analyze_cleans_temp_audio_files(
+    mock_main_get_client,
+    mock_inference_get_client,
+    mock_coaching_get_client,
+    monkeypatch,
+    tmp_path,
+):
+    client = _client_with_mocks(mock_main_get_client, mock_inference_get_client, mock_coaching_get_client)
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    before = {item.name for item in tmp_path.iterdir()}
+
+    response = client.post(
+        "/analyze",
+        files={"file": ("sample.wav", _make_wav_bytes(), "audio/wav")},
+        data={"context": "benchmark", "title": "Test"},
+    )
+
+    assert response.status_code == 200
+    after = {item.name for item in tmp_path.iterdir()}
+    assert after == before
 
 
 def test_drill_completion_endpoint_persists_minimal_completion():
