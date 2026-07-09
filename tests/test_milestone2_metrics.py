@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from schemas import AuthorityV2Response
 from services.acoustic_metrics import extract_acoustic_analysis
-from services.audio_preprocessing import preprocess_audio
+import services.audio_preprocessing as audio_preprocessing
+from services.audio_preprocessing import _ffmpeg_available, preprocess_audio
 from services.linguistic_metrics import build_linguistic_metrics, compute_delivery_metrics
 
 
@@ -43,6 +44,25 @@ def _write_temp_wav(directory, name: str = "audio.wav", **kwargs) -> str:
     return path
 
 
+def _write_segmented_wav(directory, name: str = "segmented.wav", sample_rate: int = 16000) -> str:
+    first_seconds = 4.0
+    gap_seconds = 2.0
+    second_seconds = 4.0
+    t1 = np.linspace(0, first_seconds, int(first_seconds * sample_rate), endpoint=False)
+    t2 = np.linspace(0, second_seconds, int(second_seconds * sample_rate), endpoint=False)
+    first = 0.25 * np.sin(2 * np.pi * 220.0 * t1)
+    gap = np.zeros(int(gap_seconds * sample_rate))
+    second = 0.25 * np.sin(2 * np.pi * 330.0 * t2)
+    audio = (np.concatenate([first, gap, second]) * 32767).astype(np.int16)
+    path = str(directory / name)
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio.tobytes())
+    return path
+
+
 def test_filler_rich_transcript_increases_filler_words_per_min(tmp_path):
     wav = _write_temp_wav(tmp_path, "speech.wav", duration_seconds=10.0)
     text = "um uh like you know um uh basically like um sort of kind of um"
@@ -64,6 +84,76 @@ def test_silent_audio_returns_quality_warning_not_crash(tmp_path):
     result = preprocess_audio(wav)
     assert result.audio_quality.usable is False
     assert any("short" in w.lower() or "signal" in w.lower() for w in result.audio_quality.quality_warnings)
+
+
+def test_preprocess_preserves_audio_after_internal_silence_gap(tmp_path):
+    if not _ffmpeg_available():
+        pytest.skip("ffmpeg required for preprocessing regression")
+    wav = _write_segmented_wav(tmp_path)
+
+    result = preprocess_audio(wav)
+
+    assert result.duration_ms >= 9000
+    with wave.open(result.wav_path, "rb") as wav_file:
+        sample_rate = wav_file.getframerate()
+        frames = wav_file.readframes(wav_file.getnframes())
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+    tail_start = int(7.0 * sample_rate)
+    tail_rms = float(np.sqrt(np.mean(samples[tail_start:] ** 2)))
+    assert tail_rms > 0.05
+
+
+def test_long_audio_does_not_collapse_to_one_second_after_preprocessing(tmp_path):
+    if not _ffmpeg_available():
+        pytest.skip("ffmpeg required for preprocessing regression")
+    wav = _write_segmented_wav(tmp_path, "long_gap.wav")
+
+    result = preprocess_audio(wav)
+
+    assert result.duration_ms > 7000
+
+
+def test_ffmpeg_preprocess_filter_does_not_remove_trailing_silence(monkeypatch, tmp_path):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return MagicMock()
+
+    monkeypatch.setattr(audio_preprocessing.subprocess, "run", fake_run)
+
+    audio_preprocessing._run_ffmpeg_preprocess(str(tmp_path / "input.mp3"), str(tmp_path / "output.wav"))
+
+    filter_arg = commands[0][commands[0].index("-af") + 1]
+    assert "silenceremove=start_periods=1" in filter_arg
+    assert "stop_periods" not in filter_arg
+    assert "stop_duration" not in filter_arg
+    assert "stop_threshold" not in filter_arg
+
+
+def test_preprocess_reruns_without_silenceremove_when_duration_collapses(monkeypatch, tmp_path):
+    source = tmp_path / "source.mp3"
+    source.write_bytes(b"placeholder")
+    calls = []
+    probe_values = iter([10000, 1000])
+
+    monkeypatch.setattr(audio_preprocessing, "_ffmpeg_available", lambda: True)
+    monkeypatch.setattr(audio_preprocessing, "_probe_duration_ms", lambda _path: next(probe_values, 10000))
+
+    def fake_preprocess(input_path, output_path, *, trim_leading_silence=True):
+        calls.append(trim_leading_silence)
+
+    monkeypatch.setattr(audio_preprocessing, "_run_ffmpeg_preprocess", fake_preprocess)
+    monkeypatch.setattr(
+        audio_preprocessing,
+        "_assess_processed_audio",
+        lambda _path: (10000, MagicMock(usable=True, quality_warnings=[])),
+    )
+
+    result = preprocess_audio(source)
+
+    assert calls == [True, False]
+    assert result.duration_ms == 10000
 
 
 def test_missing_advanced_metrics_do_not_crash(tmp_path):

@@ -44,14 +44,22 @@ def convert_to_wav(input_path: str) -> str:
 
 def preprocess_audio(input_path: str | os.PathLike[str]) -> PreprocessResult:
     """
-    Normalize audio to mono 16 kHz WAV, trim leading/trailing silence,
+    Normalize audio to mono 16 kHz WAV, optionally trim leading silence,
     and assess quality.
     """
     input_path = str(input_path)
     output_path = _processed_output_path(input_path)
+    original_duration_ms = _probe_duration_ms(input_path)
 
     if _ffmpeg_available():
-        _run_ffmpeg_preprocess(input_path, output_path)
+        _run_ffmpeg_preprocess(
+            input_path,
+            output_path,
+            trim_leading_silence=original_duration_ms is not None,
+        )
+        processed_duration_ms = _probe_duration_ms(output_path)
+        if _processed_duration_is_suspicious(original_duration_ms, processed_duration_ms):
+            _run_ffmpeg_preprocess(input_path, output_path, trim_leading_silence=False)
     elif input_path.lower().endswith(".wav"):
         output_path = input_path
     else:
@@ -70,14 +78,53 @@ def _processed_output_path(input_path: str) -> str:
     return f"{base}.processed.wav"
 
 
-def _run_ffmpeg_preprocess(input_path: str, output_path: str) -> None:
-    """Trim silence, normalize to mono 16 kHz, and apply loudness normalization."""
-    silence_filter = (
-        "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-45dB:"
-        "stop_periods=1:stop_duration=0.2:stop_threshold=-45dB"
-    )
+def _probe_duration_ms(path: str) -> int | None:
+    """Probe container duration without applying any trimming."""
+    if _ffmpeg_available():
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            duration = float(result.stdout.strip())
+            if duration > 0:
+                return int(duration * 1000)
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+            pass
+    try:
+        _, _, duration = _load_samples(path)
+        if duration > 0:
+            return int(duration * 1000)
+    except Exception:
+        return None
+    return None
+
+
+def _processed_duration_is_suspicious(original_duration_ms: int | None, processed_duration_ms: int | None) -> bool:
+    if original_duration_ms is None or processed_duration_ms is None:
+        return False
+    return original_duration_ms > 5000 and processed_duration_ms < int(original_duration_ms * 0.7)
+
+
+def _run_ffmpeg_preprocess(input_path: str, output_path: str, *, trim_leading_silence: bool = True) -> None:
+    """Normalize to mono 16 kHz WAV and apply loudness normalization."""
+    filters = []
+    if trim_leading_silence:
+        filters.append("silenceremove=start_periods=1:start_duration=0.1:start_threshold=-45dB")
     loudness_filter = f"loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11"
-    combined_filter = f"{silence_filter},{loudness_filter}"
+    filters.append(loudness_filter)
+    combined_filter = ",".join(filters)
     
     subprocess.run(
         [
