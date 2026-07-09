@@ -95,6 +95,30 @@ def _main_report_text(report) -> str:
     return str(payload)
 
 
+def _user_facing_copy(report) -> list[str]:
+    reads = report.perception_map.model_dump().values()
+    return [
+        report.mirror.headline,
+        report.mirror.identity_read,
+        report.diagnosis.core_pattern,
+        report.diagnosis.social_consequence,
+        *(read["text"] for read in reads if read),
+        report.hidden_cost.consequence,
+        report.highest_leverage_fix.plain_english,
+        report.highest_leverage_fix.why_this_matters,
+        report.highest_leverage_fix.action_step,
+        report.training_prescription.why_chosen,
+        report.training_prescription.success_signal,
+        *(report.training_prescription.instructions or []),
+        *(item.signal for item in report.evidence_chain),
+        *(item.what_happened for item in report.evidence_chain),
+        *(item.listener_interpretation for item in report.evidence_chain),
+        *(item.why_it_matters for item in report.evidence_chain),
+        *(item.summary for item in report.timeline),
+        *(item.listener_interpretation for item in report.timeline),
+    ]
+
+
 def test_premium_report_contains_all_required_sections_and_validation():
     report = _generated_report()
 
@@ -259,3 +283,67 @@ def test_technical_appendix_keeps_raw_metric_style_values():
     assert "filler_words_per_min" in appendix_metrics
     assert "pause_frequency_per_minute" in appendix_metrics
     assert "avg_pause_duration_ms" in appendix_metrics
+
+
+def test_major_sections_trace_to_observable_behaviour():
+    report = _generated_report()
+    observed_fragments = [
+        item.signal.split(",", 1)[0].lower()
+        for item in report.evidence_chain
+    ] + [
+        item.what_happened.split(",", 1)[0].lower()
+        for item in report.evidence_chain
+    ]
+
+    major_copy = " ".join(
+        value or ""
+        for value in [
+            report.mirror.headline,
+            report.mirror.identity_read,
+            report.diagnosis.core_pattern,
+            report.perception_map.first_impression.text,
+            report.highest_leverage_fix.plain_english,
+            report.training_prescription.why_chosen,
+        ]
+    ).lower()
+    assert any(fragment and fragment in major_copy for fragment in observed_fragments)
+
+
+def test_evidence_signals_are_observations_not_template_labels():
+    report = _generated_report()
+    forbidden_labels = {
+        "Pace pressure",
+        "Controlled pacing",
+        "Filler burden",
+        "Low filler control",
+        "Hesitation clustering",
+        "Pause ownership",
+        "Weak closing",
+        "Strong opening",
+        "Rising endings",
+        "Dynamic emphasis",
+        "Monotony",
+        "Low specificity",
+        "Strong specificity",
+        "Weak structure",
+        "Strong structure",
+    }
+
+    assert all(item.signal not in forbidden_labels for item in report.evidence_chain)
+    assert all(len(item.signal.split()) >= 5 for item in report.evidence_chain)
+
+
+def test_user_facing_copy_has_no_internal_ids_or_generic_placeholders():
+    report = _generated_report()
+    copy = " ".join(value or "" for value in _user_facing_copy(report)).lower()
+
+    forbidden = [
+        "weak_finality_reduces_perceived_leadership",
+        "selected focus",
+        "target area",
+        "deterministic",
+        "metric itself",
+        "dimension label",
+    ]
+    for phrase in forbidden:
+        assert phrase not in copy

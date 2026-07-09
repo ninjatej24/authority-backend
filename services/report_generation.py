@@ -121,6 +121,23 @@ class EvidenceTemplate:
     min_duration_ms: int = 25000
 
 
+@dataclass(frozen=True)
+class BehaviourObservation:
+    id: str
+    dimension: str
+    direction: str
+    observed_cue: str
+    behaviour: str
+    listener_interpretation: str
+    consequence: str
+    fix: str
+    evidence_id: str
+    confidence: float
+    source_metrics: tuple[str, ...] = ()
+    start_ms: int | None = None
+    end_ms: int | None = None
+
+
 def _dimension_scores(scores: Scores) -> dict[str, int]:
     return scores.dimension_scores.model_dump()
 
@@ -177,6 +194,36 @@ def _plain_metric_label(metric: str) -> str:
     }.get(metric, metric.split(".")[-1].replace("_", " "))
 
 
+def _sentence(text: str | None) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    return cleaned if cleaned.endswith((".", "!", "?")) else f"{cleaned}."
+
+
+def _lower_first(text: str | None) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    return cleaned[:1].lower() + cleaned[1:]
+
+
+def _window_label(start_ms: int | None, end_ms: int | None, duration_ms: int | None = None) -> str:
+    if start_ms is None or end_ms is None:
+        return "in the recording"
+    midpoint = (start_ms + end_ms) / 2
+    if duration_ms and duration_ms > 0:
+        position = midpoint / duration_ms
+        if position < 0.25:
+            return "during the opening"
+        if position > 0.75:
+            return "near the end"
+        return "during the middle of the answer"
+    return "at the highlighted moment"
+
+
 def _clean_report_text(text: str) -> str:
     cleaned = text
     metric_labels = {
@@ -221,6 +268,22 @@ def _visible_evidence_ids(candidate_ids: list[str], cards: list[ReportEvidenceCa
     visible = {card.evidence_id for card in cards}
     filtered = [evidence_id for evidence_id in candidate_ids if evidence_id in visible]
     return filtered or [card.evidence_id for card in cards[:3]]
+
+
+def _primary_positive(cards: list[ReportEvidenceCard]) -> ReportEvidenceCard | None:
+    return next((card for card in cards if card.direction == "positive"), cards[0] if cards else None)
+
+
+def _primary_negative(cards: list[ReportEvidenceCard]) -> ReportEvidenceCard | None:
+    return next((card for card in cards if card.direction == "negative"), None)
+
+
+def _card_behaviour(card: ReportEvidenceCard | None) -> str:
+    return _lower_first((card.what_happened if card else "") or (card.signal if card else "")).rstrip(".")
+
+
+def _card_observation(card: ReportEvidenceCard | None) -> str:
+    return _lower_first((card.signal if card else "") or (card.what_happened if card else "")).rstrip(".")
 
 
 def _authority_type(scores: Scores, evidence_ids: list[str], confidence: float) -> ReportAuthorityType:
@@ -275,28 +338,37 @@ def _authority_type(scores: Scores, evidence_ids: list[str], confidence: float) 
     )
 
 
-def _mirror(scores: Scores, authority_type: ReportAuthorityType, strongest: str, limiter: str, confidence_label: str, evidence_ids: list[str]) -> ReportMirror:
+def _mirror(scores: Scores, authority_type: ReportAuthorityType, strongest: str, limiter: str, confidence_label: str, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportMirror:
     score = scores.authority_score
-    prefix = "This recording suggests" if confidence_label in {"low", "medium"} else "You sound"
-    if score >= 91:
-        headline = "You sound like someone people naturally defer to: clear, intentional, and fully in control."
+    positive = _primary_positive(evidence_cards)
+    negative = _primary_negative(evidence_cards)
+    pos_behaviour = _card_behaviour(positive)
+    neg_observation = _card_observation(negative)
+    prefix = "This recording suggests you " if confidence_label in {"low", "medium"} else "You "
+    if positive and negative:
+        headline = f"{prefix}land best when {pos_behaviour}; the drag is that {neg_observation}."
+    elif positive:
+        headline = f"{prefix}sound most authoritative when {pos_behaviour}."
+    elif negative:
+        headline = f"{prefix}are currently held back by this behaviour: {neg_observation}."
     elif score >= 81:
         headline = "You sound clear, composed, and easy to trust with the floor."
-    elif score >= 67:
-        headline = "You sound composed, intelligent, and increasingly authoritative."
     elif score >= 53:
-        headline = f"{prefix} capable and {strongest.lower()}, but not yet fully {limiter.lower()}."
-    elif score >= 39:
-        headline = "This recording suggests you sound thoughtful, but not yet consistently settled."
+        headline = f"{prefix}sound capable, but this sample needs more behavioural evidence to name the exact limiter."
     else:
         headline = "This recording suggests your delivery may be under-signalling your point."
 
-    identity = f"Listeners are likely to notice your {strongest.lower()}, while {limiter.lower()} shapes the current growth edge."
+    if positive and negative:
+        identity = f"Listeners are likely to trust the moments where {pos_behaviour}, while {neg_observation} makes the message feel less fully led."
+        tension = f"{positive.related_dimension} supported by behaviour; {negative.related_dimension} limited by behaviour"
+    else:
+        identity = f"Listeners are likely to notice your {strongest.lower()}, while {limiter.lower()} shapes the current growth edge."
+        tension = f"{strongest} constrained by {limiter}"
     return ReportMirror(
         headline=headline,
         identity_read=identity,
         one_line_identity_read=identity,
-        core_tension=f"{strongest} constrained by {limiter}",
+        core_tension=tension,
         emotional_tone=_emotional_tone(scores),
         authority_type=authority_type.label,
         confidence_label=confidence_label,  # type: ignore[arg-type]
@@ -318,21 +390,35 @@ def _emotional_tone(scores: Scores) -> str:
     return "competent with some unevenness"
 
 
-def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: list[str]) -> ReportDiagnosis:
+def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportDiagnosis:
     dims = _dimension_scores(scores)
     primary = diagnostic.primary_diagnosis
+    positive = _primary_positive(evidence_cards)
+    negative = _primary_negative(evidence_cards)
     if primary:
         strength = primary.affected_dimensions[0] if primary.affected_dimensions else DIMENSION_LABELS[_ordered_dimensions(scores)[0][0]]
         limiter = primary.affected_dimensions[-1] if primary.affected_dimensions else DIMENSION_LABELS[sorted(dims.items(), key=lambda item: item[1])[0][0]]
         linked = [item for item in primary.supporting_evidence_ids if item in evidence_ids] or evidence_ids
+        if positive and negative:
+            pattern = f"{_card_observation(positive)}; but {_card_observation(negative)}"
+            consequence = f"Listeners may believe the stronger moment, then discount some authority when {_card_behaviour(negative)}"
+        elif negative:
+            pattern = _card_observation(negative)
+            consequence = _diagnosis_consequence(negative.related_dimension)
+        elif positive:
+            pattern = _card_observation(positive)
+            consequence = f"Listeners are likely to trust the recording most when {_card_behaviour(positive)}."
+        else:
+            pattern = primary.diagnosis_id.replace("_", " ")
+            consequence = _diagnosis_consequence(limiter)
         return ReportDiagnosis(
             strongest_dimension=strength,
             limiting_dimension=limiter,
             primary_strength_dimension=strength,
             primary_limiting_dimension=limiter,
-            core_behavioural_pattern=primary.diagnosis_id,
-            core_pattern=primary.diagnosis_id,
-            social_consequence=_diagnosis_consequence(limiter),
+            core_behavioural_pattern=pattern,
+            core_pattern=pattern,
+            social_consequence=consequence,
             supporting_evidence_ids=linked,
             evidence_ids=linked,
             severity=primary.severity,
@@ -341,14 +427,23 @@ def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: li
     strongest = DIMENSION_LABELS[_ordered_dimensions(scores)[0][0]]
     limiter_key = sorted(dims.items(), key=lambda item: item[1])[0][0]
     limiter = DIMENSION_LABELS[limiter_key]
+    if positive and negative:
+        pattern = f"{_card_observation(positive)}; but {_card_observation(negative)}"
+        consequence = f"Listeners may trust the controlled parts, then feel less led when {_card_behaviour(negative)}"
+    elif negative:
+        pattern = _card_observation(negative)
+        consequence = _diagnosis_consequence(negative.related_dimension)
+    else:
+        pattern = f"{strongest.lower()} constrained by {limiter.lower()}"
+        consequence = _diagnosis_consequence(limiter)
     return ReportDiagnosis(
         strongest_dimension=strongest,
         limiting_dimension=limiter,
         primary_strength_dimension=strongest,
         primary_limiting_dimension=limiter,
-        core_behavioural_pattern=f"{strongest.lower()} constrained by {limiter.lower()}",
-        core_pattern=f"{strongest.lower()} constrained by {limiter.lower()}",
-        social_consequence=_diagnosis_consequence(limiter),
+        core_behavioural_pattern=pattern,
+        core_pattern=pattern,
+        social_consequence=consequence,
         supporting_evidence_ids=evidence_ids,
         evidence_ids=evidence_ids,
         severity=_severity(dims[limiter_key]),  # type: ignore[arg-type]
@@ -371,19 +466,39 @@ def _read(label: str, text: str, evidence_ids: list[str], confidence: float) -> 
     return ReportPerceptionRead(label=label, text=text, evidence_ids=evidence_ids, confidence=round(confidence, 2))
 
 
-def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityType, confidence: float, evidence_ids: list[str]) -> ReportPerceptionMap:
-    limiter = (diagnosis.limiting_dimension or "Command").lower()
-    strength = (diagnosis.strongest_dimension or "Clarity").lower()
+def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityType, confidence: float, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportPerceptionMap:
+    positive = _primary_positive(evidence_cards)
+    negative = _primary_negative(evidence_cards)
+    pos = _card_behaviour(positive) or "the answer gives the listener a clear route"
+    neg = _card_observation(negative)
+    neg_behaviour = _card_behaviour(negative)
     phrase = _confidence_phrase(confidence)
+    first_label = "Behaviour-led read" if not authority_type.label else authority_type.label
+    if not negative:
+        first_text = f"The first impression {phrase} that you are easiest to trust when {pos}. The report does not have a strong enough negative behaviour to make a sharper limiting claim."
+        professional_text = f"Professionally, the clearest read is behavioural: {pos}."
+        status_text = "The status signal is best supported by the controlled behaviour in the evidence, rather than by a strong negative drag."
+        emotional_text = f"The emotional read is not fixed personality. In this recording, the listener likely feels steadier when {pos}."
+        interview_text = f"In an interview, this would likely be easiest to trust where {pos}."
+        leadership_text = f"The leadership signal comes from the moments where {pos}; a sharper limiter needs more negative evidence."
+        persuasion_text = "Persuasion should build from the strongest observed behaviour before adding new proof or contrast."
+    else:
+        first_text = f"The first impression {phrase} that you are easiest to trust when {pos}, but less commanding when {neg}."
+        professional_text = f"Professionally, the useful signal is behavioural: {pos}. The ceiling is the moment where {neg_behaviour}."
+        status_text = f"The status signal rises when the delivery holds its shape; it dips when {neg_behaviour}, because the listener has to do more interpretive work."
+        emotional_text = f"The emotional read is not fixed personality. In this recording, the listener likely feels steadier during the controlled behaviour and more tension around the drag: {neg}."
+        interview_text = f"In an interview, this would likely be understood, but the answer would land stronger if the main claim were supported or closed before {neg_behaviour}."
+        leadership_text = f"The leadership signal comes from the moments where {pos}; the risk is that {neg_behaviour} makes the listener feel less fully led."
+        persuasion_text = f"Persuasion depends on giving belief something to attach to; the next gain is to fix the behaviour where {neg_behaviour}."
     return ReportPerceptionMap(
-        first_impression=_read(authority_type.label or "Developing Voice", f"The first impression {phrase} {authority_type.description or 'a mixed but interpretable authority signal'}.", evidence_ids, confidence),
-        professional_read=_read(f"{strength.title()} led", f"Professionally, listeners are likely to read the recording through {strength}, with {limiter} shaping the ceiling.", evidence_ids, confidence),
-        social_status_read=_read("Status signal", f"This may come across as respectable, with {limiter} limiting automatic deference.", evidence_ids, confidence),
-        emotional_read=_read("Emotional signal", f"This recording {phrase} a delivery shaped by {limiter} and supported by {strength}.", evidence_ids, confidence),
-        interview_read=_read("Interview signal", "Listeners are likely to reward clear openings, controlled pacing, and clean closing in this recording.", evidence_ids, confidence),
-        leadership_read=_read("Leadership signal", "Leadership read is strongest when command, composure, and structure align in the evidence.", evidence_ids, confidence),
-        trust_read=_read("Trust signal", "Trust is supported when clarity, structure, and composure point in the same direction.", evidence_ids, confidence),
-        persuasion_read=_read("Persuasion signal", "Persuasion strengthens when conviction, structure, and emphasis are aligned.", evidence_ids, confidence),
+        first_impression=_read(first_label, first_text, evidence_ids, confidence),
+        professional_read=_read("Professional read", professional_text, evidence_ids, confidence),
+        social_status_read=_read("Status read", status_text, evidence_ids, confidence),
+        emotional_read=_read("Emotional read", emotional_text, evidence_ids, confidence),
+        interview_read=_read("Interview read", interview_text, evidence_ids, confidence),
+        leadership_read=_read("Leadership read", leadership_text, evidence_ids, confidence),
+        trust_read=_read("Trust read", f"Trust is supported by the observable control in this sample, especially when {pos}.", evidence_ids, confidence),
+        persuasion_read=_read("Persuasion read", persuasion_text, evidence_ids, confidence),
     )
 
 
@@ -728,31 +843,191 @@ def _template_supported(template: EvidenceTemplate, active: dict[str, Psychologi
     return True
 
 
-def _card_from_template(template: EvidenceTemplate, active: dict[str, PsychologicalEvidenceSignal], confidence: float, weak_sample: bool, moment: Moment | None) -> ReportEvidenceCard:
+def _best_moment_for_template(template_id: str, moments: list[Moment]) -> Moment | None:
+    type_map = {
+        "pace_pressure": {"rushing_moment", "confidence_drop", "most_unstable_section"},
+        "controlled_pacing": {"most_composed_moment", "pause_ownership_moment", "strongest_moment"},
+        "filler_burden": {"filler_cluster", "confidence_drop", "most_costly_sentence"},
+        "low_filler_control": {"strongest_moment", "best_sentence", "most_composed_moment"},
+        "hesitation_clustering": {"hesitation_cluster", "confidence_drop", "most_costly_sentence"},
+        "pause_ownership": {"pause_ownership_moment", "most_commanding_moment", "most_composed_moment"},
+        "weak_closing": {"weak_closing", "weakest_moment"},
+        "strong_opening": {"strong_opening", "best_sentence", "strongest_moment"},
+        "rising_endings": {"weak_closing", "most_costly_sentence"},
+        "dynamic_emphasis": {"high_presence_moment", "most_persuasive_moment", "strongest_moment"},
+        "monotony": {"monotone_stretch", "weakest_moment"},
+        "low_specificity": {"most_costly_sentence", "weakest_moment"},
+        "strong_specificity": {"best_sentence", "most_persuasive_moment", "strongest_moment"},
+        "weak_structure": {"weak_opening", "weak_closing", "most_unstable_section"},
+        "strong_structure": {"strong_opening", "strong_closing", "best_sentence"},
+    }
+    preferred = type_map.get(template_id, set())
+    return next((moment for moment in moments if moment.type in preferred), moments[0] if moments else None)
+
+
+def _transcript_reference(moment: Moment | None, confidence: float) -> str:
+    if not moment or not moment.transcript_span or confidence < 0.78:
+        return ""
+    words = moment.transcript_span.split()
+    if len(words) < 3 or len(words) > 18:
+        return ""
+    return " in the highlighted phrase"
+
+
+def _observation_from_template(
+    template: EvidenceTemplate,
+    active: dict[str, PsychologicalEvidenceSignal],
+    confidence: float,
+    weak_sample: bool,
+    moment: Moment | None,
+    duration_ms: int,
+) -> BehaviourObservation:
     source = [active[signal] for signal in template.source_signals if signal in active]
     evidence_id = source[0].evidence_id if source else f"report_ev_{template.id}"
     card_confidence = round(min(0.92, max(0.42, confidence * 0.75 + template.rank * 0.25)), 2)
-    timestamp = None
     start_ms = end_ms = None
     if moment and moment.start_ms is not None and moment.end_ms is not None and moment.end_ms > moment.start_ms:
         start_ms = moment.start_ms
         end_ms = moment.end_ms
-        timestamp = [start_ms, end_ms]
-    return ReportEvidenceCard(
-        evidence_id=evidence_id,
+    place = _window_label(start_ms, end_ms, duration_ms)
+    transcript_ref = _transcript_reference(moment, confidence)
+
+    observed = template.what_happened
+    behaviour = template.what_happened
+    listener = template.listener_interpretation
+    consequence = template.why_it_matters
+    fix = template.fix
+
+    if template.id == "pace_pressure":
+        observed = f"Your delivery sped up {place}{transcript_ref} instead of holding the same measured pace."
+        behaviour = "The main point started to feel compressed just as it needed more space."
+        listener = "Listeners may hear that as you trying to keep up with your own thought rather than leading them through it."
+        consequence = "The social cost is pressure leakage: the idea can sound less settled than it is."
+        fix = "Pause before the key claim, then deliver the next sentence without accelerating."
+    elif template.id == "controlled_pacing":
+        observed = f"Your pace stayed even {place}, and the phrasing gave the listener enough room to follow."
+        behaviour = "The recording shows you can hold the floor without rushing to fill it."
+        listener = "Listeners are likely to experience this as calm control rather than effort."
+        consequence = "That steadiness helps the listener feel that the moment is not pushing you off balance."
+        fix = "Keep this pace and add a slightly longer pause before the sentence you most want remembered."
+    elif template.id == "filler_burden":
+        observed = f"Fillers clustered {place}, so the wording sounded repaired while the thought was still moving."
+        behaviour = "The answer briefly shifted from delivering the point to searching for the next phrase."
+        listener = "Listeners may start tracking the search instead of the substance."
+        consequence = "The cost is clarity: the idea asks for more effort than it needs."
+        fix = "Replace the first filler impulse with silence, then restart on the next complete clause."
+    elif template.id == "low_filler_control":
+        observed = f"The recording stayed mostly free of filler clutter {place}."
+        behaviour = "You left fewer verbal repair marks in the path of the answer."
+        listener = "Listeners are likely to read the phrasing as prepared and under control."
+        consequence = "That gives clarity more room to land because the listener does not have to filter around repairs."
+        fix = "Protect this strength by pausing before difficult wording instead of filling the gap."
+    elif template.id == "hesitation_clustering":
+        observed = f"Hesitations grouped together {place} instead of appearing as isolated pauses."
+        behaviour = "The disruption became locally concentrated, which makes it more noticeable."
+        listener = "Listeners may hear a temporary loss of command over the answer path."
+        consequence = "The cost is composure: the recording briefly sounds more pressured than the content requires."
+        fix = "After the first disruption, stop, breathe, and restart with one clean clause."
+    elif template.id == "pause_ownership":
+        observed = f"A pause landed cleanly {place}, giving the previous idea space instead of breaking it."
+        behaviour = "The silence sounded intentional rather than like missing wording."
+        listener = "Listeners are likely to feel you are comfortable holding the floor."
+        consequence = "That creates command because the listener is not rushed into the next point."
+        fix = "Keep placing silence after complete thoughts, not in the middle of the important phrase."
+    elif template.id == "weak_closing":
+        observed = f"The answer ended {place} without fully reinforcing the message."
+        behaviour = "The final point arrived, then the recording moved on before it had a clean landing."
+        listener = "Listeners may understand the answer but feel less finality at the end."
+        consequence = "The hidden cost is a weaker last impression, which can make the whole answer feel less led."
+        fix = "End with one short takeaway sentence, then hold silence after it."
+    elif template.id == "strong_opening":
+        observed = f"The opening established the point quickly {place}."
+        behaviour = "You gave the listener a frame before asking them to process detail."
+        listener = "Listeners are likely to read the start as prepared and easy to follow."
+        consequence = "That strengthens structure because the answer has a visible route from the first few seconds."
+        fix = "Keep leading with the answer first, then add proof."
+    elif template.id == "rising_endings":
+        observed = f"Some statements lifted at the end {place} instead of landing as finished claims."
+        behaviour = "The sentence endings softened the authority of the words."
+        listener = "Listeners may hear the line as checking for agreement rather than delivering a position."
+        consequence = "The cost is command: the point can sound less final than the content deserves."
+        fix = "Drop the final stressed word slightly and hold a half-beat of silence."
+    elif template.id == "dynamic_emphasis":
+        observed = f"Your voice gave the important words more contrast {place}."
+        behaviour = "The delivery marked what mattered instead of treating every phrase equally."
+        listener = "Listeners are more likely to remember the point because the emphasis guides their attention."
+        consequence = "That supports presence and persuasion by making the message easier to keep listening to."
+        fix = "Use this contrast on one or two words per sentence, not every word."
+    elif template.id == "monotony":
+        observed = f"The delivery flattened {place}, with too little contrast around the ideas that needed emphasis."
+        behaviour = "Clear content was delivered with less vocal shape than the point required."
+        listener = "Listeners may understand the words but remember less of what mattered."
+        consequence = "The cost is presence: the answer can feel less consequential than it is."
+        fix = "Choose one word in the next key sentence and give it more pitch or energy contrast."
+    elif template.id == "low_specificity":
+        observed = "The answer leaned on broad claims without giving the listener many concrete anchors."
+        behaviour = "The message explained the idea more than it proved it."
+        listener = "Listeners may find the point plausible but not fully evidenced."
+        consequence = "The cost is persuasion: belief has fewer details to attach to."
+        fix = "Support the main claim with one example, number, named situation, or observable detail before moving on."
+    elif template.id == "strong_specificity":
+        observed = "The answer gave the listener concrete details to hold onto."
+        behaviour = "The claim was supported rather than left as a general assertion."
+        listener = "Listeners are likely to experience the message as more grounded."
+        consequence = "That strengthens persuasion because confidence feels earned."
+        fix = "Keep pairing each main point with one concrete proof point."
+    elif template.id == "weak_structure":
+        observed = f"The answer path became less controlled {place}; the listener had to infer the route."
+        behaviour = "The recording sounded more like thinking through the point than guiding the listener through it."
+        listener = "Listeners may trust the content but feel less certain where the answer is going."
+        consequence = "The cost is authority drift: unclear sequencing weakens confidence in your control."
+        fix = "Use point, proof, close: one claim, one example, one final sentence."
+    elif template.id == "strong_structure":
+        observed = f"The answer gave the listener a clear route {place}."
+        behaviour = "The sequence made the idea easier to follow without extra listener work."
+        listener = "Listeners are likely to read this as organised and prepared."
+        consequence = "That supports structure because the path is visible, not implied."
+        fix = "Keep the sequence visible: answer first, proof second, close cleanly."
+
+    if weak_sample:
+        observed = _soften(observed, confidence, weak_sample)
+
+    return BehaviourObservation(
         id=template.id,
-        trait=template.trait,
         dimension=template.dimension,
-        direction=template.direction,  # type: ignore[arg-type]
-        signal=template.signal,
-        what_happened=_soften(template.what_happened, confidence, weak_sample),
-        why_it_matters=f"{template.why_it_matters} Fix: {template.fix}",
-        listener_interpretation=template.listener_interpretation,
-        related_dimension=template.dimension,
+        direction=template.direction,
+        observed_cue=_sentence(observed),
+        behaviour=_sentence(behaviour),
+        listener_interpretation=_sentence(listener),
+        consequence=_sentence(consequence),
+        fix=_sentence(fix),
+        evidence_id=evidence_id,
         confidence=card_confidence,
-        source_metrics=[_plain_metric_label(signal.metric) for signal in source],
+        source_metrics=tuple(_plain_metric_label(signal.metric) for signal in source),
         start_ms=start_ms,
         end_ms=end_ms,
+    )
+
+
+def _card_from_observation(observation: BehaviourObservation) -> ReportEvidenceCard:
+    timestamp = None
+    if observation.start_ms is not None and observation.end_ms is not None and observation.end_ms > observation.start_ms:
+        timestamp = [observation.start_ms, observation.end_ms]
+    return ReportEvidenceCard(
+        evidence_id=observation.evidence_id,
+        id=observation.id,
+        trait=observation.dimension.lower(),
+        dimension=observation.dimension,
+        direction=observation.direction,  # type: ignore[arg-type]
+        signal=observation.observed_cue,
+        what_happened=observation.behaviour,
+        why_it_matters=f"{observation.consequence} Fix: {observation.fix}",
+        listener_interpretation=observation.listener_interpretation,
+        related_dimension=observation.dimension,
+        confidence=observation.confidence,
+        source_metrics=list(observation.source_metrics),
+        start_ms=observation.start_ms,
+        end_ms=observation.end_ms,
         timestamp=timestamp,
     )
 
@@ -869,39 +1144,133 @@ def _evidence_cards(
 ) -> list[ReportEvidenceCard]:
     weak_sample = bool(duration_ms and duration_ms < 25000) or confidence < 0.45 or not audio_quality.usable
     active = _active_signal_map(psychological)
-    moment = moments[0] if moments else None
     cards = [
-        _card_from_template(template, active, confidence, weak_sample, moment)
+        _card_from_observation(
+            _observation_from_template(
+                template,
+                active,
+                confidence,
+                weak_sample,
+                _best_moment_for_template(template.id, moments),
+                duration_ms,
+            )
+        )
         for template in _evidence_templates().values()
         if _template_supported(template, active, duration_ms, confidence, audio_quality)
     ]
     ranked = _rank_evidence_cards(cards, diagnostic, coaching)
     if ranked:
         return ranked
+    moment = moments[0] if moments else None
     return _fallback_evidence_cards(evidence, confidence, weak_sample, moment)
 
 
-def _timeline(moments: list[Moment], evidence_ids: list[str]) -> list[ReportTimelineItem]:
+def _moment_copy(moment: Moment, duration_ms: int) -> tuple[str, str, str, str]:
+    place = _window_label(moment.start_ms, moment.end_ms, duration_ms)
+    if moment.type == "rushing_moment":
+        return (
+            "The answer sped up here",
+            f"{place}, the delivery compressed the point instead of giving it space.",
+            "Listeners may hear this as pressure entering the answer.",
+            "This matters because pace changes are easiest to feel when the idea becomes important.",
+        )
+    if moment.type == "filler_cluster":
+        return (
+            "The wording needed repair here",
+            f"{place}, fillers clustered enough to pull attention away from the point.",
+            "Listeners may hear this as searching for wording rather than delivering the idea.",
+            "This matters because clustered repairs are more noticeable than isolated fillers.",
+        )
+    if moment.type == "hesitation_cluster":
+        return (
+            "The thought briefly lost flow",
+            f"{place}, pauses grouped together and made the answer path feel interrupted.",
+            "Listeners may experience this as a short loss of control over the point.",
+            "This matters because hesitation clusters can make solid content feel less settled.",
+        )
+    if moment.type in {"weak_closing", "weak_ending"}:
+        return (
+            "The ending did not fully land",
+            "The answer reached its final point without reinforcing the message as a conclusion.",
+            "Listeners may understand the point but feel less finality from it.",
+            "This matters because endings disproportionately shape what the listener remembers.",
+        )
+    if moment.type == "monotone_stretch":
+        return (
+            "The delivery flattened here",
+            f"{place}, the voice gave less contrast to the material than the point needed.",
+            "Listeners may understand the words but remember less of the emphasis.",
+            "This matters because low contrast reduces presence and persuasive pull.",
+        )
+    if moment.type in {"strong_opening", "best_sentence"}:
+        return (
+            "The point was clearest here",
+            f"{place}, the answer gave the listener a cleaner frame for the idea.",
+            "Listeners are likely to hear this as prepared and easy to follow.",
+            "This matters because strong local phrasing shows what the speaker can repeat deliberately.",
+        )
+    if moment.type in {"pause_ownership_moment", "most_commanding_moment"}:
+        return (
+            "You held the floor here",
+            f"{place}, the delivery sounded controlled enough to let the point breathe.",
+            "Listeners are likely to read the silence or pacing as intentional.",
+            "This matters because owned space creates command without forcing volume.",
+        )
+    if moment.type in {"high_presence_moment", "most_persuasive_moment"}:
+        return (
+            "The message had more pull here",
+            f"{place}, emphasis and energy made the point easier to notice.",
+            "Listeners are more likely to keep attention on this part.",
+            "This matters because persuasion needs guided attention, not only clear words.",
+        )
+    if moment.type in {"strongest_moment", "most_composed_moment"}:
+        return (
+            "This was the most controlled stretch",
+            f"{place}, the delivery showed the cleanest version of the recording's authority signal.",
+            "Listeners are likely to hear this as one of the more settled parts of the answer.",
+            "This matters because it gives the training plan a concrete behavioural target.",
+        )
+    if moment.type in {"confidence_drop", "weakest_moment", "most_costly_sentence", "most_unstable_section"}:
+        return (
+            "Control dipped here",
+            f"{place}, the delivery became less settled than the surrounding material.",
+            "Listeners may feel the answer working harder than it needs to.",
+            "This matters because local drops explain why the overall impression is not just the average score.",
+        )
+    return (
+        moment.headline,
+        moment.summary,
+        moment.listener_interpretation or _moment_interpretation(moment),
+        moment.why_it_matters or "This moment is included because it carries interpretable evidence.",
+    )
+
+
+def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int) -> list[ReportTimelineItem]:
     items: list[ReportTimelineItem] = []
     for moment in moments:
+        if moment.start_ms is None or moment.end_ms <= moment.start_ms or (moment.confidence is not None and 0 < moment.confidence < 0.35):
+            continue
         impact_values = list(moment.dimension_impact.values())
         confidence = moment.confidence or min(0.9, max(0.45, 0.62 + sum(abs(value) for value in impact_values[:3]) * 0.4))
+        if confidence < 0.4:
+            continue
         moment_evidence = [item for item in moment.supporting_evidence_ids if item in evidence_ids] or evidence_ids[:3]
+        headline, summary, interpretation, why = _moment_copy(moment, duration_ms)
         items.append(
             ReportTimelineItem(
                 moment_id=moment.moment_id,
                 type=moment.type,
                 priority=moment.priority,
-                headline=moment.headline,
-                summary=moment.summary,
-                listener_interpretation=moment.listener_interpretation or _moment_interpretation(moment),
-                why_it_matters=moment.why_it_matters,
+                headline=headline,
+                summary=summary,
+                listener_interpretation=interpretation,
+                why_it_matters=why,
                 dimension_impact=moment.dimension_impact,
                 confidence=round(confidence, 2),
                 start_ms=moment.start_ms,
                 end_ms=moment.end_ms,
                 evidence_ids=moment_evidence,
-                supporting_metrics=moment.supporting_metrics,
+                supporting_metrics=[_plain_metric_label(metric) for metric in moment.supporting_metrics],
                 transcript_span=moment.transcript_span,
                 word_ids=moment.word_ids,
                 scenario_relevance=moment.scenario_relevance,
@@ -935,7 +1304,7 @@ def _moment_interpretation(moment: Moment) -> str:
     return "This moment is included because existing analysis marked it as report-relevant."
 
 
-def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float) -> dict[str, ReportDimensionReport]:
+def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float, evidence_cards: list[ReportEvidenceCard]) -> dict[str, ReportDimensionReport]:
     dims = _dimension_scores(scores)
     reports = {}
     for dimension, score in dims.items():
@@ -958,6 +1327,13 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
             if contributor_notes:
                 why = contributor_notes[:4]
         why = [_clean_report_text(item) for item in why]
+        observed = [
+            f"{card.signal} This affected {card.related_dimension.lower()} because {card.listener_interpretation}"
+            for card in evidence_cards
+            if card.related_dimension.lower() == DIMENSION_LABELS[dimension].lower()
+        ]
+        if observed:
+            why = observed + why
         label = "strong" if score >= 75 else "developing" if score >= 58 else "limited"
         reports[dimension] = ReportDimensionReport(
             dimension=DIMENSION_LABELS[dimension],
@@ -973,18 +1349,26 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
     return reports
 
 
-def _hidden_cost(diagnosis: ReportDiagnosis, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float) -> ReportHiddenCost:
+def _hidden_cost(diagnosis: ReportDiagnosis, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float, evidence_cards: list[ReportEvidenceCard]) -> ReportHiddenCost:
     reasoning = diagnostic.hidden_cost_reasoning
+    negative = _primary_negative(evidence_cards)
+    behaviour = _card_behaviour(negative)
     if reasoning:
         linked = [item for item in reasoning.evidence_ids if item in evidence_ids] or evidence_ids
+        consequence = _hidden_cost_sentence(reasoning.listener_effect)
+        if behaviour:
+            consequence = f"The hidden cost is that when {behaviour}, {consequence[0].lower() + consequence[1:]}"
         return ReportHiddenCost(
             dimension=diagnosis.limiting_dimension,
             cost_id=reasoning.cost_id,
-            consequence=_hidden_cost_sentence(reasoning.listener_effect),
+            consequence=consequence,
             evidence_ids=linked,
             confidence=reasoning.confidence,
         )
-    return ReportHiddenCost(dimension=diagnosis.limiting_dimension, cost_id="hidden_cost", consequence=_diagnosis_consequence(diagnosis.limiting_dimension), evidence_ids=evidence_ids, confidence=confidence)
+    consequence = _diagnosis_consequence(diagnosis.limiting_dimension)
+    if behaviour:
+        consequence = f"The hidden cost is that when {behaviour}, {consequence[0].lower() + consequence[1:]}"
+    return ReportHiddenCost(dimension=diagnosis.limiting_dimension, cost_id="hidden_cost", consequence=consequence, evidence_ids=evidence_ids, confidence=confidence)
 
 
 def _hidden_cost_sentence(effect: str | None) -> str:
@@ -1012,7 +1396,7 @@ def _expected_score_lift_label(primary, reasoning) -> str | None:
     return "low"
 
 
-def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: DiagnosticReasoning, evidence_ids: list[str]) -> ReportHighestLeverageFix:
+def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportHighestLeverageFix:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
     if primary and coaching:
@@ -1023,35 +1407,57 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
     issue = drill.title if drill else (reasoning.issue_id.replace("_", " ") if reasoning and reasoning.issue_id else "Practice focus")
     plain = drill.description if drill else (reasoning.plain_reason if reasoning else "Use the clearest supported practice focus from this recording.")
     duration = drill.estimated_duration_min if drill else None
+    focus_card = _primary_negative(evidence_cards) or _primary_positive(evidence_cards)
+    behaviour = _card_behaviour(focus_card)
+    if focus_card and behaviour:
+        plain = (
+            f"The fastest improvement is to change the behaviour where {behaviour}."
+            if focus_card.direction == "negative"
+            else f"The fastest improvement is to repeat the behaviour deliberately where {behaviour}."
+        )
+        action_step = _sentence((focus_card.why_it_matters.split("Fix:", 1)[1] if "Fix:" in focus_card.why_it_matters else focus_card.what_happened).strip())
+        why = f"This matters because listeners are likely to experience that behaviour as: {focus_card.listener_interpretation}"
+        success = f"The next recording should make this target behaviour clearer: {focus_card.signal}"
+    else:
+        plain = _clean_report_text(plain)
+        action_step = _clean_report_text(drill.description if drill else plain)
+        why = f"This is the fastest useful fix because it changes how the listener reads {', '.join(drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else [])) or 'the limiting signal'}."
+        success = f"The next recording should sound more controlled in {', '.join(drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else [])) or 'the target area'}."
     return ReportHighestLeverageFix(
         issue=issue,
         plain_english=plain,
-        why_this_matters=f"This is the fastest useful fix because it changes how the listener reads {', '.join(drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else [])) or 'the limiting signal'}.",
+        why_this_matters=why,
         expected_score_lift=_expected_score_lift_label(primary, reasoning),
         target_dimensions=drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else []),
         first_drill_id=drill.drill_id if drill else (reasoning.recommended_first_drill if reasoning else None),
-        action_step=drill.description if drill else plain,
-        success_signal=f"The next recording should sound more controlled in {', '.join(drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else [])) or 'the target area'}.",
+        action_step=action_step,
+        success_signal=success,
         duration_min=duration,
         selection_score=primary.score if primary else (reasoning.selection_score if reasoning else 0.0),
         evidence_ids=linked,
     )
 
 
-def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix) -> ReportTrainingPrescription:
+def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, evidence_cards: list[ReportEvidenceCard]) -> ReportTrainingPrescription:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
     if primary and coaching:
         drill = next((item for item in coaching.drill_library if item.drill_id == primary.drill_id), None)
     if drill:
+        focus_card = _primary_negative(evidence_cards) or _primary_positive(evidence_cards)
+        why_chosen = (
+            f"Chosen because the report's clearest trainable behaviour is: {_card_observation(focus_card)}."
+            if focus_card
+            else f"Chosen because this recording's strongest coachable listener-cost points to {', '.join(drill.target_dimensions)}."
+        )
         return ReportTrainingPrescription(
             drill_id=drill.drill_id,
             title=drill.title,
-            why_chosen=f"Chosen because this recording's strongest coachable listener-cost points to {', '.join(drill.target_dimensions)}.",
-            instructions=[drill.description],
+            why_chosen=why_chosen,
+            instructions=[fix.action_step or drill.description],
             target_metrics=[_plain_metric_label(metric) for metric in drill.target_metrics],
             target_dimensions=drill.target_dimensions,
-            action_step=drill.description,
+            action_step=fix.action_step or drill.description,
             expected_score_lift=fix.expected_score_lift,
             duration_min=drill.estimated_duration_min,
             success_signal=fix.success_signal or "The next recording should make the target behaviour easier for a listener to hear.",
@@ -1060,7 +1466,7 @@ def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix) ->
     return ReportTrainingPrescription(
         drill_id=fix.first_drill_id,
         title=fix.issue,
-        why_chosen=fix.why_this_matters,
+        why_chosen=f"Chosen because the clearest trainable behaviour is: {fix.plain_english}",
         instructions=[fix.action_step or "Practice the target behaviour once, then retest on the same prompt."],
         target_metrics=fix.target_dimensions,
         target_dimensions=fix.target_dimensions,
@@ -1195,9 +1601,9 @@ def build_generated_report(
     strongest = DIMENSION_LABELS[dims[0][0]]
     limiter = DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
     authority_type = _authority_type(scores, evidence_ids, confidence)
-    mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids)
-    diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids)
-    perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, confidence, evidence_ids), profile.scenario_id)
+    mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids, evidence_cards)
+    diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids, evidence_cards)
+    perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, confidence, evidence_ids, evidence_cards), profile.scenario_id)
     weak_sample = bool(duration_ms and duration_ms < 25000) or confidence < 0.45 or not audio_quality.usable
     if weak_sample:
         limited_text = "This sample does not contain enough reliable evidence for a strong psychological read. Treat the result as a light directional signal and retest with a longer, clearer recording."
@@ -1218,11 +1624,11 @@ def build_generated_report(
                     )
                 }
             )
-    timeline = _timeline(moments, evidence_ids)
-    dimension_reports = _dimension_reports(scores, diagnostic_reasoning, evidence_ids, confidence)
-    hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, confidence)
-    fix = _highest_leverage_fix(coaching_engine, diagnostic_reasoning, evidence_ids)
-    training = _training(coaching_engine, fix)
+    timeline = _timeline(moments, evidence_ids, duration_ms)
+    dimension_reports = _dimension_reports(scores, diagnostic_reasoning, evidence_ids, confidence, evidence_cards)
+    hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, confidence, evidence_cards)
+    fix = _highest_leverage_fix(coaching_engine, diagnostic_reasoning, evidence_ids, evidence_cards)
+    training = _training(coaching_engine, fix, evidence_cards)
     retest = _retest(fix, duration_ms)
     appendix = _technical_appendix(metrics, scores, audio_quality, evidence_ids)
     share_card = _share_card(scores, authority_type, mirror, diagnosis)
