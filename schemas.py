@@ -790,6 +790,9 @@ class ReportHighestLeverageFix(BaseModel):
     expected_score_lift: Literal["low", "medium", "high"] | None = None
     target_dimensions: list[str] = Field(default_factory=list)
     first_drill_id: str | None = None
+    action_step: str | None = None
+    success_signal: str | None = None
+    duration_min: int | None = None
     selection_score: float = 0.0
     evidence_ids: list[str] = Field(default_factory=list)
 
@@ -800,6 +803,10 @@ class ReportTrainingPrescription(BaseModel):
     why_chosen: str | None = None
     instructions: list[str] = Field(default_factory=list)
     target_metrics: list[str] = Field(default_factory=list)
+    target_dimensions: list[str] = Field(default_factory=list)
+    action_step: str | None = None
+    expected_score_lift: Literal["low", "medium", "high"] | None = None
+    duration_min: int | None = None
     success_signal: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
 
@@ -843,12 +850,19 @@ class ReportTechnicalAppendix(BaseModel):
 
 class ReportEvidenceCard(BaseModel):
     evidence_id: str
+    id: str | None = None
+    trait: str | None = None
+    dimension: str | None = None
+    direction: Literal["positive", "negative", "neutral"] | None = None
     signal: str
     what_happened: str
     why_it_matters: str
     listener_interpretation: str
     related_dimension: str
     confidence: float
+    source_metrics: list[str] = Field(default_factory=list)
+    start_ms: int | None = None
+    end_ms: int | None = None
     timestamp: list[int] | None = None
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from schemas import (
     AudioQuality,
     AuthorityReport,
@@ -84,6 +86,40 @@ TECHNICAL_APPENDIX_METRICS = {
     "structure_score": ("linguistic", "structure_score"),
 }
 
+MAIN_REPORT_RAW_MARKERS = (
+    "raw_acoustic.",
+    "linguistic.",
+    "derived.",
+    "rhythm.",
+    "vad.",
+    "articulation.",
+    "words_per_minute",
+    "filler_words_per_min",
+    "burst_speaking_segments",
+    "speed_up_segments",
+    "hesitation_cluster_score",
+    "rhythm_consistency",
+    "terminal_rising_ratio",
+    "dynamic_emphasis_score",
+    "structure_score",
+)
+
+
+@dataclass(frozen=True)
+class EvidenceTemplate:
+    id: str
+    trait: str
+    dimension: str
+    direction: str
+    signal: str
+    what_happened: str
+    why_it_matters: str
+    listener_interpretation: str
+    fix: str
+    source_signals: tuple[str, ...]
+    rank: float
+    min_duration_ms: int = 25000
+
 
 def _dimension_scores(scores: Scores) -> dict[str, int]:
     return scores.dimension_scores.model_dump()
@@ -112,12 +148,79 @@ def _confidence_phrase(confidence: float) -> str:
     return "may suggest"
 
 
+def _soften(text: str, confidence: float, weak_sample: bool) -> str:
+    if confidence >= 0.6 and not weak_sample:
+        return text
+    lowered = text[:1].lower() + text[1:] if text else text
+    return f"In this sample, this may suggest {lowered}"
+
+
+def _plain_metric_label(metric: str) -> str:
+    return {
+        "raw_acoustic.words_per_minute": "speaking pace",
+        "linguistic.filler_words_per_min": "filler load",
+        "derived.hesitation_cluster_score": "hesitation clustering",
+        "raw_acoustic.avg_pause_ms": "pause length",
+        "raw_acoustic.mid_phrase_pause_rate": "mid-phrase pausing",
+        "linguistic.closing_strength_score": "closing strength",
+        "linguistic.opening_strength_score": "opening strength",
+        "raw_acoustic.terminal_rising_ratio": "rising endings",
+        "derived.dynamic_emphasis_score": "dynamic emphasis",
+        "raw_acoustic.f0_range_semitones": "pitch contrast",
+        "raw_acoustic.loudness_variation_db": "energy contrast",
+        "derived.monotony_index": "vocal monotony",
+        "linguistic.specificity_score": "specificity",
+        "linguistic.structure_score": "structure",
+        "rhythm.rhythm_consistency": "rhythm stability",
+        "rhythm.speed_up_segments": "pace acceleration",
+        "rhythm.burst_speaking_segments": "burst speaking",
+    }.get(metric, metric.split(".")[-1].replace("_", " "))
+
+
+def _clean_report_text(text: str) -> str:
+    cleaned = text
+    metric_labels = {
+        "raw_acoustic.words_per_minute": "speaking pace",
+        "linguistic.filler_words_per_min": "filler load",
+        "derived.hesitation_cluster_score": "hesitation clustering",
+        "raw_acoustic.terminal_rising_ratio": "rising endings",
+        "derived.dynamic_emphasis_score": "dynamic emphasis",
+        "linguistic.structure_score": "answer structure",
+        "rhythm.rhythm_consistency": "rhythm stability",
+        "rhythm.speed_up_segments": "pace acceleration",
+        "rhythm.burst_speaking_segments": "burst speaking",
+        "articulation.clarity_proxy": "articulation clarity",
+        "linguistic.self_doubt_markers": "self-doubt markers",
+    }
+    for marker, label in sorted(metric_labels.items(), key=lambda item: len(item[0]), reverse=True):
+        cleaned = cleaned.replace(marker, label)
+    for prefix in ("raw_acoustic.", "linguistic.", "derived.", "rhythm.", "vad.", "articulation."):
+        cleaned = cleaned.replace(prefix, "")
+    cleaned = cleaned.replace("behaviour:", "")
+    return cleaned.replace("_", " ")
+
+
+def _num(value) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _severity(score: int) -> str:
     if score < 45:
         return "high"
     if score < 60:
         return "medium"
     return "low"
+
+
+def _visible_evidence_ids(candidate_ids: list[str], cards: list[ReportEvidenceCard]) -> list[str]:
+    visible = {card.evidence_id for card in cards}
+    filtered = [evidence_id for evidence_id in candidate_ids if evidence_id in visible]
+    return filtered or [card.evidence_id for card in cards[:3]]
 
 
 def _authority_type(scores: Scores, evidence_ids: list[str], confidence: float) -> ReportAuthorityType:
@@ -221,6 +324,7 @@ def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: li
     if primary:
         strength = primary.affected_dimensions[0] if primary.affected_dimensions else DIMENSION_LABELS[_ordered_dimensions(scores)[0][0]]
         limiter = primary.affected_dimensions[-1] if primary.affected_dimensions else DIMENSION_LABELS[sorted(dims.items(), key=lambda item: item[1])[0][0]]
+        linked = [item for item in primary.supporting_evidence_ids if item in evidence_ids] or evidence_ids
         return ReportDiagnosis(
             strongest_dimension=strength,
             limiting_dimension=limiter,
@@ -229,8 +333,8 @@ def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: li
             core_behavioural_pattern=primary.diagnosis_id,
             core_pattern=primary.diagnosis_id,
             social_consequence=_diagnosis_consequence(limiter),
-            supporting_evidence_ids=primary.supporting_evidence_ids,
-            evidence_ids=primary.supporting_evidence_ids,
+            supporting_evidence_ids=linked,
+            evidence_ids=linked,
             severity=primary.severity,
         )
 
@@ -335,42 +439,446 @@ def _scenario_summary(scores: Scores, fix: ReportHighestLeverageFix, coaching: C
     )
 
 
-def _evidence_cards(evidence: list[EvidenceItem], psychological: PsychologicalInference, moments: list[Moment]) -> list[ReportEvidenceCard]:
-    cards: list[ReportEvidenceCard] = []
-    moment = moments[0] if moments else None
-    for item in evidence[:5]:
+def _evidence_templates() -> dict[str, EvidenceTemplate]:
+    templates = [
+        EvidenceTemplate(
+            "pace_pressure",
+            "composure",
+            "Composure",
+            "negative",
+            "Pace pressure",
+            "The delivery compressed important ideas instead of giving them room to land.",
+            "When pace feels pressured, listeners can read urgency as loss of control.",
+            "Capable, but pushing the point faster than the listener can comfortably absorb it.",
+            "Use a one-beat pause before the key claim, then deliver the sentence at an even pace.",
+            ("pace_fast", "pace_acceleration", "burst_speaking"),
+            0.92,
+        ),
+        EvidenceTemplate(
+            "controlled_pacing",
+            "composure",
+            "Composure",
+            "positive",
+            "Controlled pacing",
+            "The pace sat in a controlled range and the rhythm stayed easy to follow.",
+            "Measured pacing lowers listener effort and makes the speaker sound more settled.",
+            "Composed enough for the listener to stay with the idea rather than track the delivery.",
+            "Keep the same pace, then add slightly longer pauses before the most important lines.",
+            ("pace_controlled", "stable_rhythm"),
+            0.78,
+        ),
+        EvidenceTemplate(
+            "filler_burden",
+            "clarity",
+            "Clarity",
+            "negative",
+            "Filler burden",
+            "Fillers appeared often enough to interrupt the sense of clean thought control.",
+            "Repeated fillers make the listener spend attention on searching rather than substance.",
+            "Knowledgeable, but momentarily less certain about the wording.",
+            "Replace the first filler impulse with silence, then restart the phrase cleanly.",
+            ("high_fillers", "very_high_fillers"),
+            0.9,
+        ),
+        EvidenceTemplate(
+            "low_filler_control",
+            "clarity",
+            "Clarity",
+            "positive",
+            "Low filler control",
+            "The recording stayed largely free of filler clutter.",
+            "Low filler load helps the listener hear verbal control and confidence.",
+            "Clearer and more prepared because the phrasing does not keep asking for repair.",
+            "Preserve this by pausing before hard words instead of filling the gap.",
+            ("low_fillers",),
+            0.72,
+        ),
+        EvidenceTemplate(
+            "hesitation_clustering",
+            "composure",
+            "Composure",
+            "negative",
+            "Hesitation clustering",
+            "Disruptions concentrated into clusters rather than staying isolated.",
+            "Clustered hesitation is more noticeable than the same amount spread across a recording.",
+            "The thought process may sound briefly overloaded, even when the content is useful.",
+            "Stop after the first disruption, breathe, and restart with the next complete clause.",
+            ("hesitation_high", "hesitation_windows"),
+            0.88,
+        ),
+        EvidenceTemplate(
+            "pause_ownership",
+            "command",
+            "Command",
+            "positive",
+            "Pause ownership",
+            "Pauses landed as intentional space rather than loss of wording.",
+            "Owned silence gives claims more status and makes the speaker sound less rushed.",
+            "Comfortable holding the floor without filling every gap.",
+            "Keep pauses at clause endings and avoid breaking the middle of key phrases.",
+            ("owned_pauses", "low_mid_phrase_pauses"),
+            0.82,
+        ),
+        EvidenceTemplate(
+            "weak_closing",
+            "structure",
+            "Structure",
+            "negative",
+            "Weak closing",
+            "The ending did not fully preserve the force of the answer.",
+            "A weak close can make the final impression feel less decisive than the content deserves.",
+            "The listener may understand the point but feel less finality at the end.",
+            "End with one short takeaway sentence and let the voice fall to a full stop.",
+            ("closing_weak",),
+            0.84,
+        ),
+        EvidenceTemplate(
+            "strong_opening",
+            "structure",
+            "Structure",
+            "positive",
+            "Strong opening",
+            "The opening established the point quickly.",
+            "Strong openings frame the listener's first impression before doubts can form.",
+            "Prepared and easy to follow from the start.",
+            "Keep leading with the answer first, then add proof.",
+            ("opening_strong",),
+            0.8,
+        ),
+        EvidenceTemplate(
+            "rising_endings",
+            "command",
+            "Command",
+            "negative",
+            "Rising endings",
+            "Some declarative lines lifted at the end instead of landing as finished claims.",
+            "Rising endings can make statements sound like they are asking for permission.",
+            "Less fully led, especially when the sentence is meant to be a conclusion.",
+            "Drop the final word slightly and hold silence after important statements.",
+            ("rising_endings",),
+            0.82,
+        ),
+        EvidenceTemplate(
+            "dynamic_emphasis",
+            "presence",
+            "Presence",
+            "positive",
+            "Dynamic emphasis",
+            "Important words carried more vocal contrast than surrounding material.",
+            "Contrast makes the listener remember which ideas matter most.",
+            "More engaged and easier to keep listening to.",
+            "Use the same contrast on only one or two words per sentence.",
+            ("dynamic_emphasis_high", "pitch_variation_healthy", "energy_variation_healthy"),
+            0.77,
+        ),
+        EvidenceTemplate(
+            "monotony",
+            "presence",
+            "Presence",
+            "negative",
+            "Monotony",
+            "The delivery gave too little contrast to the ideas that should stand out.",
+            "Flat emphasis weakens memorability even when the words are clear.",
+            "Competent, but less memorable than the content could be.",
+            "Choose the one word that carries the sentence and give it more pitch or energy contrast.",
+            ("dynamic_emphasis_low", "pitch_variation_low", "energy_variation_low"),
+            0.8,
+        ),
+        EvidenceTemplate(
+            "low_specificity",
+            "persuasion",
+            "Persuasion",
+            "negative",
+            "Low specificity",
+            "The answer leaned more on general claims than concrete proof.",
+            "Specific evidence makes confidence feel earned rather than merely asserted.",
+            "Plausible, but not yet grounded enough to create strong belief.",
+            "Add one named example, number, or observable detail after the main claim.",
+            ("specificity_low", "concreteness_low"),
+            0.74,
+        ),
+        EvidenceTemplate(
+            "strong_specificity",
+            "persuasion",
+            "Persuasion",
+            "positive",
+            "Strong specificity",
+            "The answer gave the listener concrete details to hold onto.",
+            "Specificity turns a claim into something that feels more credible.",
+            "Grounded and easier to trust.",
+            "Keep pairing each main point with one concrete proof point.",
+            ("specificity_high", "concreteness_high"),
+            0.72,
+        ),
+        EvidenceTemplate(
+            "weak_structure",
+            "structure",
+            "Structure",
+            "negative",
+            "Weak structure",
+            "The answer path did not feel fully controlled.",
+            "Loose structure creates authority drift because listeners have to infer the route themselves.",
+            "Thoughtful, but harder to follow than it needs to be.",
+            "Use point, proof, close: one claim, one example, one final sentence.",
+            ("structure_low", "rambling_high", "repetition_high"),
+            0.86,
+        ),
+        EvidenceTemplate(
+            "strong_structure",
+            "structure",
+            "Structure",
+            "positive",
+            "Strong structure",
+            "The answer gave the listener a clear path through the idea.",
+            "Structure reduces cognitive effort and increases trust in the speaker's control.",
+            "Organised, prepared, and easier to believe.",
+            "Keep the sequence visible: answer first, proof second, close cleanly.",
+            ("structure_high", "rambling_low"),
+            0.76,
+        ),
+    ]
+    return {template.id: template for template in templates}
+
+
+def _signal_is_active(signal: PsychologicalEvidenceSignal) -> bool:
+    value = signal.observed_value
+    if value is None:
+        return False
+    signal_id = signal.evidence_id.removeprefix("psi_ev_")
+    numeric = _num(value)
+    return {
+        "high_fillers": numeric >= 8,
+        "very_high_fillers": numeric >= 12,
+        "low_fillers": numeric <= 3,
+        "pace_fast": numeric >= 175,
+        "pace_controlled": 115 <= numeric <= 165,
+        "pace_slow": 0 < numeric <= 95,
+        "pace_acceleration": numeric >= 1,
+        "burst_speaking": numeric >= 1,
+        "stable_rhythm": numeric >= 0.70,
+        "unstable_rhythm": numeric <= 0.45,
+        "hesitation_high": numeric >= 0.55,
+        "hesitation_low": numeric <= 0.25,
+        "hesitation_windows": numeric >= 1,
+        "owned_pauses": 250 <= numeric <= 800,
+        "mid_phrase_pauses": numeric >= 0.35,
+        "low_mid_phrase_pauses": numeric <= 0.25,
+        "falling_endings": numeric >= 0.35,
+        "rising_endings": numeric >= 0.45,
+        "dynamic_emphasis_high": numeric >= 0.60,
+        "dynamic_emphasis_low": numeric <= 0.30,
+        "pitch_variation_low": 0 < numeric <= 3.5,
+        "pitch_variation_healthy": numeric >= 5,
+        "energy_variation_low": 0 <= numeric <= 3.5,
+        "energy_variation_healthy": numeric >= 4.5,
+        "opening_strong": numeric >= 0.70,
+        "opening_weak": numeric <= 0.45,
+        "closing_strong": numeric >= 0.70,
+        "closing_weak": numeric <= 0.50,
+        "structure_high": numeric >= 0.70,
+        "structure_low": numeric <= 0.45,
+        "specificity_high": numeric >= 0.55,
+        "specificity_low": numeric <= 0.30,
+        "concreteness_high": numeric >= 0.45,
+        "concreteness_low": numeric <= 0.25,
+        "rambling_high": numeric >= 0.45,
+        "rambling_low": numeric <= 0.25,
+        "repetition_high": numeric >= 0.45,
+    }.get(signal_id, False)
+
+
+def _active_signal_map(psychological: PsychologicalInference) -> dict[str, PsychologicalEvidenceSignal]:
+    active = {}
+    for signal in psychological.evidence_chain:
+        signal_id = signal.evidence_id.removeprefix("psi_ev_")
+        if _signal_is_active(signal):
+            active[signal_id] = signal
+    if "pace_controlled" in active:
+        active.pop("pace_fast", None)
+        active.pop("pace_slow", None)
+    if "stable_rhythm" in active:
+        active.pop("unstable_rhythm", None)
+    if "low_fillers" in active:
+        active.pop("high_fillers", None)
+        active.pop("very_high_fillers", None)
+    if "hesitation_low" in active:
+        active.pop("hesitation_high", None)
+        active.pop("hesitation_windows", None)
+    if "dynamic_emphasis_high" in active:
+        active.pop("dynamic_emphasis_low", None)
+    if "structure_high" in active:
+        active.pop("structure_low", None)
+    if "specificity_high" in active:
+        active.pop("specificity_low", None)
+    return active
+
+
+def _template_supported(template: EvidenceTemplate, active: dict[str, PsychologicalEvidenceSignal], duration_ms: int, confidence: float, audio_quality: AudioQuality) -> bool:
+    if template.direction == "negative" and duration_ms and duration_ms < template.min_duration_ms:
+        return False
+    if template.direction == "negative" and confidence < 0.45:
+        return False
+    if template.direction == "negative" and not audio_quality.usable and template.dimension in {"Composure", "Presence", "Command"}:
+        return False
+    hits = [signal for signal in template.source_signals if signal in active]
+    if not hits:
+        return False
+    if template.id in {"pace_pressure", "hesitation_clustering", "monotony", "weak_structure", "strong_structure", "strong_specificity", "dynamic_emphasis"}:
+        return len(hits) >= 2
+    return True
+
+
+def _card_from_template(template: EvidenceTemplate, active: dict[str, PsychologicalEvidenceSignal], confidence: float, weak_sample: bool, moment: Moment | None) -> ReportEvidenceCard:
+    source = [active[signal] for signal in template.source_signals if signal in active]
+    evidence_id = source[0].evidence_id if source else f"report_ev_{template.id}"
+    card_confidence = round(min(0.92, max(0.42, confidence * 0.75 + template.rank * 0.25)), 2)
+    timestamp = None
+    start_ms = end_ms = None
+    if moment and moment.start_ms is not None and moment.end_ms is not None and moment.end_ms > moment.start_ms:
+        start_ms = moment.start_ms
+        end_ms = moment.end_ms
+        timestamp = [start_ms, end_ms]
+    return ReportEvidenceCard(
+        evidence_id=evidence_id,
+        id=template.id,
+        trait=template.trait,
+        dimension=template.dimension,
+        direction=template.direction,  # type: ignore[arg-type]
+        signal=template.signal,
+        what_happened=_soften(template.what_happened, confidence, weak_sample),
+        why_it_matters=f"{template.why_it_matters} Fix: {template.fix}",
+        listener_interpretation=template.listener_interpretation,
+        related_dimension=template.dimension,
+        confidence=card_confidence,
+        source_metrics=[_plain_metric_label(signal.metric) for signal in source],
+        start_ms=start_ms,
+        end_ms=end_ms,
+        timestamp=timestamp,
+    )
+
+
+def _rank_evidence_cards(cards: list[ReportEvidenceCard], diagnosis: DiagnosticReasoning, coaching: CoachingEngine | None) -> list[ReportEvidenceCard]:
+    if not cards:
+        return []
+    limiter_dims = set()
+    if diagnosis.primary_diagnosis:
+        limiter_dims.update(diagnosis.primary_diagnosis.affected_dimensions)
+    if diagnosis.highest_leverage_reasoning:
+        limiter_dims.update(diagnosis.highest_leverage_reasoning.affected_dimensions)
+    drill_evidence = set()
+    if coaching and coaching.selected_interventions.primary_drill:
+        drill_evidence.update(coaching.selected_interventions.primary_drill.supporting_evidence_ids)
+
+    def score(card: ReportEvidenceCard) -> tuple[float, float]:
+        value = card.confidence
+        if card.direction == "negative":
+            value += 0.12
+        if card.related_dimension in limiter_dims or (card.trait or "") in limiter_dims:
+            value += 0.1
+        if card.evidence_id in drill_evidence:
+            value += 0.12
+        if card.id in {"controlled_pacing", "low_filler_control", "strong_opening", "dynamic_emphasis", "strong_specificity", "strong_structure", "pause_ownership"}:
+            value += 0.04
+        return value, card.confidence
+
+    ordered = sorted(cards, key=score, reverse=True)
+    selected: list[ReportEvidenceCard] = []
+    families: set[str] = set()
+    dimensions: set[str] = set()
+    for card in ordered:
+        family = {
+            "pace_pressure": "pace",
+            "controlled_pacing": "pace",
+            "filler_burden": "filler",
+            "low_filler_control": "filler",
+            "hesitation_clustering": "hesitation",
+            "pause_ownership": "pause",
+            "weak_closing": "closing",
+            "strong_opening": "opening",
+            "rising_endings": "ending",
+            "dynamic_emphasis": "emphasis",
+            "monotony": "emphasis",
+            "low_specificity": "specificity",
+            "strong_specificity": "specificity",
+            "weak_structure": "structure",
+            "strong_structure": "structure",
+        }.get(card.id or card.signal, card.signal)
+        if family in families:
+            continue
+        if len(selected) >= 3 and card.related_dimension in dimensions:
+            continue
+        selected.append(card)
+        families.add(family)
+        dimensions.add(card.related_dimension)
+        if len(selected) == 5:
+            break
+    if len(selected) < 3:
+        for card in ordered:
+            if card not in selected:
+                selected.append(card)
+            if len(selected) == min(3, len(ordered)):
+                break
+    has_positive = any(card.direction == "positive" for card in selected)
+    has_negative = any(card.direction == "negative" for card in selected)
+    if not has_positive:
+        positive = next((card for card in ordered if card.direction == "positive" and card not in selected), None)
+        if positive:
+            selected[-1:] = [positive]
+    if not has_negative:
+        negative = next((card for card in ordered if card.direction == "negative" and card not in selected), None)
+        if negative and len(selected) >= 3:
+            selected[-1:] = [negative]
+    return selected[:5]
+
+
+def _fallback_evidence_cards(evidence: list[EvidenceItem], confidence: float, weak_sample: bool, moment: Moment | None) -> list[ReportEvidenceCard]:
+    cards = []
+    for item in evidence[:3]:
+        timestamp = [moment.start_ms, moment.end_ms] if moment and moment.end_ms > moment.start_ms else None
         cards.append(
             ReportEvidenceCard(
                 evidence_id=item.id,
+                id=item.id,
+                trait=item.trait,
+                dimension=DIMENSION_LABELS.get(item.trait, item.trait.title()),
+                direction=item.direction if item.direction in {"positive", "negative"} else "neutral",  # type: ignore[arg-type]
                 signal=item.headline,
-                what_happened=", ".join(item.signals) if item.signals else item.headline,
-                why_it_matters=item.why_it_matters,
+                what_happened=_soften(item.headline, confidence, weak_sample),
+                why_it_matters=f"{item.why_it_matters} Fix: {DIMENSION_CUE.get(item.trait, 'Retest with one clear behaviour change.')}",
                 listener_interpretation=f"This may shape perceived {item.trait}.",
-                related_dimension=item.trait,
-                confidence=0.72 if item.direction == "positive" else 0.68,
-                timestamp=[moment.start_ms, moment.end_ms] if moment else None,
+                related_dimension=DIMENSION_LABELS.get(item.trait, item.trait.title()),
+                confidence=round(0.6 if item.direction == "positive" else 0.55, 2),
+                source_metrics=[],
+                start_ms=timestamp[0] if timestamp else None,
+                end_ms=timestamp[1] if timestamp else None,
+                timestamp=timestamp,
             )
         )
-    existing = {card.evidence_id for card in cards}
-    for signal in psychological.evidence_chain:
-        if signal.evidence_id in existing:
-            continue
-        cards.append(_psychological_evidence_card(signal))
     return cards
 
 
-def _psychological_evidence_card(signal: PsychologicalEvidenceSignal) -> ReportEvidenceCard:
-    related = signal.metric.split(".")[0]
-    return ReportEvidenceCard(
-        evidence_id=signal.evidence_id,
-        signal=signal.metric,
-        what_happened=f"{signal.metric} observed as {signal.observed_value}",
-        why_it_matters=signal.why_it_matters_psychologically,
-        listener_interpretation="This signal contributes to the listener-perception read when supported by other evidence.",
-        related_dimension=related,
-        confidence=round(min(0.95, max(0.35, signal.weight)), 2),
-        timestamp=None,
-    )
+def _evidence_cards(
+    evidence: list[EvidenceItem],
+    psychological: PsychologicalInference,
+    diagnostic: DiagnosticReasoning,
+    coaching: CoachingEngine | None,
+    moments: list[Moment],
+    confidence: float,
+    duration_ms: int,
+    audio_quality: AudioQuality,
+) -> list[ReportEvidenceCard]:
+    weak_sample = bool(duration_ms and duration_ms < 25000) or confidence < 0.45 or not audio_quality.usable
+    active = _active_signal_map(psychological)
+    moment = moments[0] if moments else None
+    cards = [
+        _card_from_template(template, active, confidence, weak_sample, moment)
+        for template in _evidence_templates().values()
+        if _template_supported(template, active, duration_ms, confidence, audio_quality)
+    ]
+    ranked = _rank_evidence_cards(cards, diagnostic, coaching)
+    if ranked:
+        return ranked
+    return _fallback_evidence_cards(evidence, confidence, weak_sample, moment)
 
 
 def _timeline(moments: list[Moment], evidence_ids: list[str]) -> list[ReportTimelineItem]:
@@ -378,7 +886,7 @@ def _timeline(moments: list[Moment], evidence_ids: list[str]) -> list[ReportTime
     for moment in moments:
         impact_values = list(moment.dimension_impact.values())
         confidence = moment.confidence or min(0.9, max(0.45, 0.62 + sum(abs(value) for value in impact_values[:3]) * 0.4))
-        moment_evidence = moment.supporting_evidence_ids or evidence_ids[:3]
+        moment_evidence = [item for item in moment.supporting_evidence_ids if item in evidence_ids] or evidence_ids[:3]
         items.append(
             ReportTimelineItem(
                 moment_id=moment.moment_id,
@@ -433,6 +941,7 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
     for dimension, score in dims.items():
         reasoning = diagnostic.dimension_reasoning.get(dimension)
         linked = reasoning.supporting_evidence_ids if reasoning and reasoning.supporting_evidence_ids else evidence_ids[:3]
+        linked = [item for item in linked if item in evidence_ids] or evidence_ids[:3]
         why = []
         if reasoning:
             why.extend(reasoning.why_score_is_high)
@@ -448,6 +957,7 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
             contributor_notes = detail.positive_contributors + detail.negative_contributors
             if contributor_notes:
                 why = contributor_notes[:4]
+        why = [_clean_report_text(item) for item in why]
         label = "strong" if score >= 75 else "developing" if score >= 58 else "limited"
         reports[dimension] = ReportDimensionReport(
             dimension=DIMENSION_LABELS[dimension],
@@ -466,11 +976,12 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
 def _hidden_cost(diagnosis: ReportDiagnosis, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float) -> ReportHiddenCost:
     reasoning = diagnostic.hidden_cost_reasoning
     if reasoning:
+        linked = [item for item in reasoning.evidence_ids if item in evidence_ids] or evidence_ids
         return ReportHiddenCost(
             dimension=diagnosis.limiting_dimension,
             cost_id=reasoning.cost_id,
             consequence=_hidden_cost_sentence(reasoning.listener_effect),
-            evidence_ids=reasoning.evidence_ids,
+            evidence_ids=linked,
             confidence=reasoning.confidence,
         )
     return ReportHiddenCost(dimension=diagnosis.limiting_dimension, cost_id="hidden_cost", consequence=_diagnosis_consequence(diagnosis.limiting_dimension), evidence_ids=evidence_ids, confidence=confidence)
@@ -507,15 +1018,23 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
     if primary and coaching:
         drill = next((item for item in coaching.drill_library if item.drill_id == primary.drill_id), None)
     reasoning = diagnostic.highest_leverage_reasoning
+    linked = primary.supporting_evidence_ids if primary else (reasoning.supporting_evidence if reasoning else evidence_ids)
+    linked = [item for item in linked if item in evidence_ids] or evidence_ids
+    issue = drill.title if drill else (reasoning.issue_id.replace("_", " ") if reasoning and reasoning.issue_id else "Practice focus")
+    plain = drill.description if drill else (reasoning.plain_reason if reasoning else "Use the clearest supported practice focus from this recording.")
+    duration = drill.estimated_duration_min if drill else None
     return ReportHighestLeverageFix(
-        issue=drill.title if drill else (reasoning.issue_id.replace("_", " ") if reasoning and reasoning.issue_id else None),
-        plain_english=drill.description if drill else (reasoning.plain_reason if reasoning else None),
-        why_this_matters=drill.description if drill else (reasoning.plain_reason if reasoning else None),
+        issue=issue,
+        plain_english=plain,
+        why_this_matters=f"This is the fastest useful fix because it changes how the listener reads {', '.join(drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else [])) or 'the limiting signal'}.",
         expected_score_lift=_expected_score_lift_label(primary, reasoning),
         target_dimensions=drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else []),
         first_drill_id=drill.drill_id if drill else (reasoning.recommended_first_drill if reasoning else None),
+        action_step=drill.description if drill else plain,
+        success_signal=f"The next recording should sound more controlled in {', '.join(drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else [])) or 'the target area'}.",
+        duration_min=duration,
         selection_score=primary.score if primary else (reasoning.selection_score if reasoning else 0.0),
-        evidence_ids=primary.supporting_evidence_ids if primary else (reasoning.supporting_evidence if reasoning else evidence_ids),
+        evidence_ids=linked,
     )
 
 
@@ -528,19 +1047,27 @@ def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix) ->
         return ReportTrainingPrescription(
             drill_id=drill.drill_id,
             title=drill.title,
-            why_chosen=f"Chosen because {drill.title.lower()} is the highest-supported deterministic intervention for this recording.",
+            why_chosen=f"Chosen because this recording's strongest coachable listener-cost points to {', '.join(drill.target_dimensions)}.",
             instructions=[drill.description],
-            target_metrics=drill.target_metrics,
-            success_signal="Compare the expected improvement model against the next recording.",
-            evidence_ids=primary.supporting_evidence_ids if primary else fix.evidence_ids,
+            target_metrics=[_plain_metric_label(metric) for metric in drill.target_metrics],
+            target_dimensions=drill.target_dimensions,
+            action_step=drill.description,
+            expected_score_lift=fix.expected_score_lift,
+            duration_min=drill.estimated_duration_min,
+            success_signal=fix.success_signal or "The next recording should make the target behaviour easier for a listener to hear.",
+            evidence_ids=[item for item in (primary.supporting_evidence_ids if primary else fix.evidence_ids) if item in fix.evidence_ids] or fix.evidence_ids,
         )
     return ReportTrainingPrescription(
         drill_id=fix.first_drill_id,
         title=fix.issue,
         why_chosen=fix.why_this_matters,
-        instructions=["Practise the selected focus using the deterministic drill attached to this issue."],
+        instructions=[fix.action_step or "Practice the target behaviour once, then retest on the same prompt."],
         target_metrics=fix.target_dimensions,
-        success_signal="The next recording should show stronger evidence on the target dimensions.",
+        target_dimensions=fix.target_dimensions,
+        action_step=fix.action_step,
+        expected_score_lift=fix.expected_score_lift,
+        duration_min=fix.duration_min,
+        success_signal=fix.success_signal or "The next recording should make the target behaviour easier for a listener to hear.",
         evidence_ids=fix.evidence_ids,
     )
 
@@ -551,18 +1078,18 @@ def _retest(fix: ReportHighestLeverageFix, duration_ms: int) -> ReportRetestPlan
     if fix.issue:
         metrics.append(fix.issue.lower())
     focus_metric = {
-        "declarative finality": "terminal_rising_ratio",
-        "Drop the Landing": "terminal_rising_ratio",
-        "Pace Anchor": "words_per_minute",
-        "Emphasis Ladder": "dynamic_emphasis_score",
-        "Point, Proof, Close": "structure_score",
+        "declarative finality": "cleaner final endings",
+        "Drop the Landing": "cleaner final endings",
+        "Pace Anchor": "steadier speaking pace",
+        "Emphasis Ladder": "stronger dynamic emphasis",
+        "Point, Proof, Close": "clearer answer structure",
     }.get(fix.issue or "", fix.issue)
     return ReportRetestPlan(
         recommended_retest_after_days=days,
         focus_metric=focus_metric,
-        compare_metrics=metrics,
+        compare_metrics=[metric.replace("_", " ") for metric in metrics],
         same_prompt_recommended=True,
-        success_definition=f"Improvement means stronger {fix.issue or 'target'} evidence on the same prompt.",
+        success_definition=fix.success_signal or f"Improvement means the same prompt lands with stronger {fix.issue or 'target'} evidence.",
         evidence_ids=fix.evidence_ids,
     )
 
@@ -651,10 +1178,19 @@ def build_generated_report(
     profile = get_scenario_profile(scenario)
     confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
     confidence_label = _confidence_label(confidence)
-    evidence_cards = _evidence_cards(evidence, psychological_inference, moments)
+    evidence_cards = _evidence_cards(
+        evidence,
+        psychological_inference,
+        diagnostic_reasoning,
+        coaching_engine,
+        moments,
+        confidence,
+        duration_ms,
+        audio_quality,
+    )
     evidence_ids = [item.evidence_id for item in evidence_cards[:5]]
     if diagnostic_reasoning.primary_diagnosis and diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids:
-        evidence_ids = diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids
+        evidence_ids = _visible_evidence_ids(diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids, evidence_cards)
     dims = _ordered_dimensions(scores)
     strongest = DIMENSION_LABELS[dims[0][0]]
     limiter = DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
@@ -662,6 +1198,26 @@ def build_generated_report(
     mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids)
     diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids)
     perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, confidence, evidence_ids), profile.scenario_id)
+    weak_sample = bool(duration_ms and duration_ms < 25000) or confidence < 0.45 or not audio_quality.usable
+    if weak_sample:
+        limited_text = "This sample does not contain enough reliable evidence for a strong psychological read. Treat the result as a light directional signal and retest with a longer, clearer recording."
+        mirror = mirror.model_copy(
+            update={
+                "headline": "There is not enough reliable evidence for a full authority diagnosis yet.",
+                "identity_read": limited_text,
+                "one_line_identity_read": limited_text,
+                "confidence_label": "low",
+                "confidence_level": "low",
+            }
+        )
+        if perception_map.first_impression:
+            perception_map = perception_map.model_copy(
+                update={
+                    "first_impression": perception_map.first_impression.model_copy(
+                        update={"text": limited_text, "confidence": min(perception_map.first_impression.confidence, 0.4)}
+                    )
+                }
+            )
     timeline = _timeline(moments, evidence_ids)
     dimension_reports = _dimension_reports(scores, diagnostic_reasoning, evidence_ids, confidence)
     hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, confidence)

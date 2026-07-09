@@ -10,6 +10,21 @@ from tests.test_psychological_inference import _infer, _metrics, _scores
 from tests.test_report_builder import _evidence, _moments
 
 
+RAW_MAIN_MARKERS = {
+    "raw_acoustic",
+    "linguistic.filler_words_per_min",
+    "derived.hesitation_cluster_score",
+    "rhythm.burst_speaking_segments",
+    "rhythm.speed_up_segments",
+    "rhythm.rhythm_consistency",
+    "filler_words_per_min",
+    "burst_speaking_segments",
+    "speed_up_segments",
+    "hesitation_cluster_score",
+    "words_per_minute",
+}
+
+
 def _generated_report(**kwargs):
     scores = kwargs.pop("scores", _softened_expert_scores())
     metrics = kwargs.pop("metrics", _metrics())
@@ -58,6 +73,26 @@ def _generated_report(**kwargs):
         duration_ms=duration_ms,
         scenario=scenario,
     )
+
+
+def _main_report_text(report) -> str:
+    payload = report.model_dump(
+        exclude={
+            "technical_appendix",
+            "diagnostic_reasoning",
+            "primary_diagnosis",
+            "secondary_diagnosis",
+            "hidden_cost_reasoning",
+            "dimension_reasoning",
+            "trait_reasoning",
+            "highest_leverage_reasoning",
+            "coaching_engine",
+            "validation",
+            "explainability",
+            "progress",
+        }
+    )
+    return str(payload)
 
 
 def test_premium_report_contains_all_required_sections_and_validation():
@@ -154,3 +189,73 @@ def test_report_consumes_v2_scoring_metadata():
     assert "calibration_metadata" in appendix
     assert "fairness_adjustments" in appendix
     assert "score_rarity_label" in appendix
+
+
+def test_main_report_copy_does_not_expose_raw_metric_keys():
+    report = _generated_report()
+    main_text = _main_report_text(report)
+
+    for marker in RAW_MAIN_MARKERS:
+        assert marker not in main_text
+
+
+def test_zero_filler_does_not_produce_high_filler_warning():
+    metrics = _metrics(linguistic={"filler_words_per_min": 0.0})
+    report = _generated_report(metrics=metrics)
+
+    evidence_ids = {item.id for item in report.evidence_chain}
+    evidence_text = str([item.model_dump() for item in report.evidence_chain]).lower()
+    assert "filler_burden" not in evidence_ids
+    assert "filler burden" not in evidence_text
+    assert "interrupt the sense of clean thought control" not in evidence_text
+
+
+def test_zero_burst_segments_do_not_produce_burst_or_pressure_warning():
+    metrics = _metrics(
+        raw={"words_per_minute": 190.0},
+        rhythm={"speed_up_segments": 0, "burst_speaking_segments": 0, "rhythm_consistency": 0.78},
+    )
+    report = _generated_report(metrics=metrics)
+
+    evidence_ids = {item.id for item in report.evidence_chain}
+    evidence_text = _main_report_text(report).lower()
+    assert "pace_pressure" not in evidence_ids
+    assert "burst speaking" not in evidence_text
+    assert "pace pressure" not in evidence_text
+
+
+def test_short_recording_suppresses_strong_psychological_claims():
+    metrics = _metrics(
+        linguistic={"filler_words_per_min": 14.0},
+        rhythm={"speed_up_segments": 3, "burst_speaking_segments": 2},
+        derived={"hesitation_cluster_score": 0.85},
+        raw={"words_per_minute": 195.0},
+    )
+    report = _generated_report(metrics=metrics, duration_ms=9000)
+
+    assert report.mirror.confidence_label == "low"
+    assert "not enough reliable evidence" in report.mirror.headline.lower()
+    assert all(item.direction != "negative" for item in report.evidence_chain)
+
+
+def test_valid_report_evidence_connects_signal_interpretation_consequence_and_fix():
+    report = _generated_report()
+
+    assert 3 <= len(report.evidence_chain) <= 5
+    for item in report.evidence_chain:
+        assert item.signal
+        assert item.what_happened
+        assert item.listener_interpretation
+        assert item.why_it_matters
+        assert "Fix:" in item.why_it_matters
+        assert item.related_dimension
+
+
+def test_technical_appendix_keeps_raw_metric_style_values():
+    report = _generated_report()
+    appendix_metrics = report.technical_appendix.metrics
+
+    assert "words_per_minute" in appendix_metrics
+    assert "filler_words_per_min" in appendix_metrics
+    assert "pause_frequency_per_minute" in appendix_metrics
+    assert "avg_pause_duration_ms" in appendix_metrics

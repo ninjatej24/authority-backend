@@ -145,7 +145,7 @@ def test_highest_leverage_fix_and_training_are_deterministic_from_limiter():
     assert "command" in report.highest_leverage_fix.target_dimensions
     assert report.training_prescription.drill_id == "drop_the_landing_v1"
     assert report.training_prescription.instructions
-    assert report.retest_plan.focus_metric == "terminal_rising_ratio"
+    assert report.retest_plan.focus_metric == "cleaner final endings"
 
 
 def test_authority_type_mapping_supports_required_type_outputs():
