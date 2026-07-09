@@ -138,6 +138,21 @@ class BehaviourObservation:
     end_ms: int | None = None
 
 
+@dataclass(frozen=True)
+class BehaviourHypothesis:
+    hypothesis_id: str
+    summary: str
+    behaviour: str
+    listener_consequence: str
+    coaching_target: str
+    primary_dimension: str
+    supporting_cards: tuple[ReportEvidenceCard, ...]
+    contradicting_cards: tuple[ReportEvidenceCard, ...]
+    confidence: float
+    margin: float
+    secondary_summary: str | None = None
+
+
 def _dimension_scores(scores: Scores) -> dict[str, int]:
     return scores.dimension_scores.model_dump()
 
@@ -286,6 +301,196 @@ def _card_observation(card: ReportEvidenceCard | None) -> str:
     return _lower_first((card.signal if card else "") or (card.what_happened if card else "")).rstrip(".")
 
 
+def _without_period(text: str | None) -> str:
+    return (text or "").strip().rstrip(".")
+
+
+def _hypothesis_seed(card: ReportEvidenceCard) -> tuple[str, str, str, str]:
+    card_id = card.id or ""
+    behaviour = _card_behaviour(card)
+    dimension = card.related_dimension or card.dimension or "Authority"
+    if card_id in {"pace_pressure", "hesitation_clustering"}:
+        return (
+            "thinks_faster_than_structure",
+            "You think faster than the answer can organise itself.",
+            f"{behaviour}, so useful ideas can arrive before the listener has a stable path.",
+            "Slow the idea down at the moment it starts to compress: pause, name the point, then continue.",
+        )
+    if card_id in {"weak_closing", "rising_endings"}:
+        return (
+            "explains_without_landing",
+            "You explain the idea without always landing it.",
+            f"{behaviour}, so the listener can understand the point without feeling its finality.",
+            "Make the last sentence a takeaway, then stop before adding more.",
+        )
+    if card_id in {"low_specificity", "weak_structure"}:
+        return (
+            "clear_idea_weak_proof",
+            "You give the listener the idea before giving them enough proof.",
+            f"{behaviour}, so the message can sound plausible before it feels fully evidenced.",
+            "Attach one concrete example to the main claim before moving to the next idea.",
+        )
+    if card_id == "monotony":
+        return (
+            "polished_but_flat",
+            "You sound controlled, but the emotional contrast is too low.",
+            f"{behaviour}, so clear content can become less memorable.",
+            "Mark the sentence's most important word with controlled contrast.",
+        )
+    if card_id == "filler_burden":
+        return (
+            "searches_while_speaking",
+            "You keep speaking while the wording is still being found.",
+            f"{behaviour}, so listeners may hear the search rather than just the point.",
+            "Replace the first filler impulse with silence and restart on a complete clause.",
+        )
+    if card_id in {"pause_ownership", "controlled_pacing"}:
+        return (
+            "controlled_when_you_create_space",
+            "You sound strongest when you give the thought space.",
+            f"{behaviour}, so authority rises when you do less and let the point breathe.",
+            "Repeat that controlled space before the most important claim.",
+        )
+    if card_id in {"strong_opening", "strong_structure"}:
+        return (
+            "clear_when_framed_first",
+            "You sound clearest when the frame comes before the detail.",
+            f"{behaviour}, so the listener trusts you when the path is visible early.",
+            "Open with the answer, then give one proof point.",
+        )
+    if card_id in {"dynamic_emphasis", "strong_specificity"}:
+        return (
+            "convincing_when_you_anchor_attention",
+            "You become more convincing when you give the listener an anchor.",
+            f"{behaviour}, so belief increases when attention has something specific to hold.",
+            "Keep one anchor per main claim: a contrast word, example, number, or named detail.",
+        )
+    return (
+        f"behaviour_{(card_id or dimension).lower()}",
+        f"Your main pattern is visible in {dimension.lower()}.",
+        f"{behaviour}.",
+        "Repeat the strongest observable behaviour and reduce the behaviour that weakens listener trust.",
+    )
+
+
+def _card_family(card: ReportEvidenceCard) -> str:
+    return {
+        "pace_pressure": "pace_control",
+        "controlled_pacing": "pace_control",
+        "hesitation_clustering": "pace_control",
+        "pause_ownership": "pace_control",
+        "filler_burden": "verbal_repair",
+        "low_filler_control": "verbal_repair",
+        "weak_closing": "finality",
+        "rising_endings": "finality",
+        "strong_opening": "framing",
+        "weak_structure": "framing",
+        "strong_structure": "framing",
+        "low_specificity": "proof",
+        "strong_specificity": "proof",
+        "monotony": "attention",
+        "dynamic_emphasis": "attention",
+    }.get(card.id or "", card.related_dimension.lower())
+
+
+def _competing_hypotheses(cards: list[ReportEvidenceCard], base_confidence: float) -> list[BehaviourHypothesis]:
+    if not cards:
+        return []
+    groups: dict[str, list[ReportEvidenceCard]] = {}
+    for card in cards:
+        seed_id, *_ = _hypothesis_seed(card)
+        groups.setdefault(seed_id, []).append(card)
+
+    hypotheses: list[BehaviourHypothesis] = []
+    all_cards = tuple(cards)
+    for seed_id, group in groups.items():
+        seed = next((card for card in group if card.direction == "negative"), group[0])
+        _, summary, behaviour, coaching = _hypothesis_seed(seed)
+        families = {_card_family(card) for card in group}
+        dimensions = {card.related_dimension for card in group}
+        support = tuple(
+            card for card in all_cards
+            if card in group
+            or _card_family(card) in families
+            or (card.direction == "positive" and card.related_dimension in dimensions)
+        )
+        contradict = tuple(
+            card for card in all_cards
+            if card not in support
+            and card.direction != seed.direction
+            and (
+                card.related_dimension in dimensions
+                or _card_family(card) in families
+            )
+        )
+        support_score = sum(card.confidence * (1.15 if card.direction == seed.direction else 0.55) for card in support)
+        contradict_score = sum(card.confidence * 0.7 for card in contradict)
+        breadth = min(0.25, len({card.related_dimension for card in support}) * 0.06)
+        raw_score = max(0.0, support_score - contradict_score + breadth)
+        confidence = round(min(0.94, max(0.35, raw_score / max(len(support) + len(contradict), 1) * base_confidence + 0.25)), 2)
+        hypotheses.append(
+            BehaviourHypothesis(
+                hypothesis_id=seed_id,
+                summary=summary,
+                behaviour=behaviour,
+                listener_consequence=_sentence(seed.listener_interpretation),
+                coaching_target=coaching,
+                primary_dimension=seed.related_dimension,
+                supporting_cards=support,
+                contradicting_cards=contradict,
+                confidence=confidence,
+                margin=0.0,
+            )
+        )
+
+    ordered = sorted(hypotheses, key=lambda item: (item.confidence, len(item.supporting_cards), -len(item.contradicting_cards)), reverse=True)
+    if not ordered:
+        return []
+    top = ordered[0]
+    second = ordered[1] if len(ordered) > 1 else None
+    margin = round(top.confidence - (second.confidence if second else 0.0), 2)
+    adjusted = [
+        hypothesis if index else BehaviourHypothesis(
+            hypothesis_id=hypothesis.hypothesis_id,
+            summary=hypothesis.summary,
+            behaviour=hypothesis.behaviour,
+            listener_consequence=hypothesis.listener_consequence,
+            coaching_target=hypothesis.coaching_target,
+            primary_dimension=hypothesis.primary_dimension,
+            supporting_cards=hypothesis.supporting_cards,
+            contradicting_cards=hypothesis.contradicting_cards,
+            confidence=round(max(0.35, hypothesis.confidence - max(0.0, 0.18 - margin)), 2),
+            margin=margin,
+            secondary_summary=second.summary if second and margin < 0.18 else None,
+        )
+        for index, hypothesis in enumerate(ordered)
+    ]
+    return adjusted
+
+
+def _winning_hypothesis(cards: list[ReportEvidenceCard], confidence: float) -> BehaviourHypothesis | None:
+    hypotheses = _competing_hypotheses(cards, confidence)
+    return hypotheses[0] if hypotheses else None
+
+
+def _hypothesis_evidence_cards(cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> list[ReportEvidenceCard]:
+    if hypothesis is None:
+        return cards[:5]
+    selected: list[ReportEvidenceCard] = []
+    for card in hypothesis.supporting_cards:
+        if card not in selected:
+            selected.append(card)
+    if hypothesis.contradicting_cards and len(selected) < 5:
+        selected.append(hypothesis.contradicting_cards[0])
+    if len(selected) < 3:
+        for card in cards:
+            if card not in selected:
+                selected.append(card)
+            if len(selected) >= min(3, len(cards)):
+                break
+    return selected[:5]
+
+
 def _authority_type(scores: Scores, evidence_ids: list[str], confidence: float) -> ReportAuthorityType:
     dims = _dimension_scores(scores)
     top = [name for name, _ in _ordered_dimensions(scores)[:2]]
@@ -338,14 +543,17 @@ def _authority_type(scores: Scores, evidence_ids: list[str], confidence: float) 
     )
 
 
-def _mirror(scores: Scores, authority_type: ReportAuthorityType, strongest: str, limiter: str, confidence_label: str, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportMirror:
+def _mirror(scores: Scores, authority_type: ReportAuthorityType, strongest: str, limiter: str, confidence_label: str, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> ReportMirror:
     score = scores.authority_score
     positive = _primary_positive(evidence_cards)
     negative = _primary_negative(evidence_cards)
     pos_behaviour = _card_behaviour(positive)
     neg_observation = _card_observation(negative)
     prefix = "This recording suggests you " if confidence_label in {"low", "medium"} else "You "
-    if positive and negative:
+    if hypothesis:
+        hypothesis_prefix = "This recording suggests " if confidence_label in {"low", "medium"} else ""
+        headline = f"{hypothesis_prefix}{_without_period(hypothesis.summary)}: {_without_period(_lower_first(hypothesis.behaviour))}."
+    elif positive and negative:
         headline = f"{prefix}land best when {pos_behaviour}; the drag is that {neg_observation}."
     elif positive:
         headline = f"{prefix}sound most authoritative when {pos_behaviour}."
@@ -358,7 +566,11 @@ def _mirror(scores: Scores, authority_type: ReportAuthorityType, strongest: str,
     else:
         headline = "This recording suggests your delivery may be under-signalling your point."
 
-    if positive and negative:
+    if hypothesis:
+        uncertainty_tail = f" A secondary explanation is still plausible: {_without_period(hypothesis.secondary_summary)}." if hypothesis.secondary_summary else ""
+        identity = f"Listeners are likely to read the recording through one pattern: {_without_period(_lower_first(hypothesis.summary))}. {_without_period(_lower_first(hypothesis.behaviour))}.{uncertainty_tail}"
+        tension = hypothesis.summary
+    elif positive and negative:
         identity = f"Listeners are likely to trust the moments where {pos_behaviour}, while {neg_observation} makes the message feel less fully led."
         tension = f"{positive.related_dimension} supported by behaviour; {negative.related_dimension} limited by behaviour"
     else:
@@ -390,7 +602,7 @@ def _emotional_tone(scores: Scores) -> str:
     return "competent with some unevenness"
 
 
-def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportDiagnosis:
+def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> ReportDiagnosis:
     dims = _dimension_scores(scores)
     primary = diagnostic.primary_diagnosis
     positive = _primary_positive(evidence_cards)
@@ -399,7 +611,12 @@ def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: li
         strength = primary.affected_dimensions[0] if primary.affected_dimensions else DIMENSION_LABELS[_ordered_dimensions(scores)[0][0]]
         limiter = primary.affected_dimensions[-1] if primary.affected_dimensions else DIMENSION_LABELS[sorted(dims.items(), key=lambda item: item[1])[0][0]]
         linked = [item for item in primary.supporting_evidence_ids if item in evidence_ids] or evidence_ids
-        if positive and negative:
+        if hypothesis:
+            pattern = hypothesis.summary
+            consequence = hypothesis.listener_consequence
+            limiter = hypothesis.primary_dimension
+            linked = [card.evidence_id for card in hypothesis.supporting_cards if card.evidence_id in evidence_ids] or linked
+        elif positive and negative:
             pattern = f"{_card_observation(positive)}; but {_card_observation(negative)}"
             consequence = f"Listeners may believe the stronger moment, then discount some authority when {_card_behaviour(negative)}"
         elif negative:
@@ -427,7 +644,11 @@ def _diagnosis(scores: Scores, diagnostic: DiagnosticReasoning, evidence_ids: li
     strongest = DIMENSION_LABELS[_ordered_dimensions(scores)[0][0]]
     limiter_key = sorted(dims.items(), key=lambda item: item[1])[0][0]
     limiter = DIMENSION_LABELS[limiter_key]
-    if positive and negative:
+    if hypothesis:
+        pattern = hypothesis.summary
+        consequence = hypothesis.listener_consequence
+        limiter = hypothesis.primary_dimension
+    elif positive and negative:
         pattern = f"{_card_observation(positive)}; but {_card_observation(negative)}"
         consequence = f"Listeners may trust the controlled parts, then feel less led when {_card_behaviour(negative)}"
     elif negative:
@@ -466,7 +687,7 @@ def _read(label: str, text: str, evidence_ids: list[str], confidence: float) -> 
     return ReportPerceptionRead(label=label, text=text, evidence_ids=evidence_ids, confidence=round(confidence, 2))
 
 
-def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityType, confidence: float, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportPerceptionMap:
+def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityType, confidence: float, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> ReportPerceptionMap:
     positive = _primary_positive(evidence_cards)
     negative = _primary_negative(evidence_cards)
     pos = _card_behaviour(positive) or "the answer gives the listener a clear route"
@@ -474,7 +695,16 @@ def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityT
     neg_behaviour = _card_behaviour(negative)
     phrase = _confidence_phrase(confidence)
     first_label = "Behaviour-led read" if not authority_type.label else authority_type.label
-    if not negative:
+    if hypothesis:
+        uncertainty_tail = f" Because another explanation is close, treat this as the leading read rather than the only possible read." if hypothesis.secondary_summary else ""
+        first_text = f"The first impression {phrase} one dominant pattern: {_lower_first(hypothesis.behaviour)}{uncertainty_tail}"
+        professional_text = f"Professionally, listeners are likely to judge the recording through that pattern: {_lower_first(hypothesis.summary)}"
+        status_text = f"The status signal depends on whether the listener feels that pattern as control or leakage: {_lower_first(hypothesis.listener_consequence)}"
+        emotional_text = f"The emotional read is the same pattern in human terms: {_lower_first(hypothesis.behaviour)}"
+        interview_text = f"In an interview, the useful question is whether this pattern helps or hurts the answer's finality: {_lower_first(hypothesis.summary)}"
+        leadership_text = f"The leadership read follows the same diagnosis: {_lower_first(hypothesis.listener_consequence)}"
+        persuasion_text = f"Persuasion improves by training the winning pattern directly: {_lower_first(hypothesis.coaching_target)}"
+    elif not negative:
         first_text = f"The first impression {phrase} that you are easiest to trust when {pos}. The report does not have a strong enough negative behaviour to make a sharper limiting claim."
         professional_text = f"Professionally, the clearest read is behavioural: {pos}."
         status_text = "The status signal is best supported by the controlled behaviour in the evidence, rather than by a strong negative drag."
@@ -1245,9 +1475,30 @@ def _moment_copy(moment: Moment, duration_ms: int) -> tuple[str, str, str, str]:
     )
 
 
-def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int) -> list[ReportTimelineItem]:
+def _moment_supports_hypothesis(moment: Moment, hypothesis: BehaviourHypothesis | None, evidence_ids: list[str]) -> bool:
+    if hypothesis is None:
+        return True
+    if set(moment.supporting_evidence_ids).intersection(evidence_ids):
+        return True
+    primary = hypothesis.hypothesis_id
+    type_groups = {
+        "thinks_faster_than_structure": {"rushing_moment", "confidence_drop", "hesitation_cluster", "most_unstable_section", "most_composed_moment", "pause_ownership_moment"},
+        "explains_without_landing": {"weak_closing", "strong_closing", "most_commanding_moment", "confidence_drop"},
+        "clear_idea_weak_proof": {"most_costly_sentence", "best_sentence", "weak_opening", "strong_opening", "most_unstable_section"},
+        "polished_but_flat": {"monotone_stretch", "high_presence_moment", "most_persuasive_moment"},
+        "searches_while_speaking": {"filler_cluster", "hesitation_cluster", "best_sentence"},
+        "controlled_when_you_create_space": {"pause_ownership_moment", "most_composed_moment", "strongest_moment", "rushing_moment"},
+        "clear_when_framed_first": {"strong_opening", "best_sentence", "weak_closing"},
+        "convincing_when_you_anchor_attention": {"most_persuasive_moment", "high_presence_moment", "best_sentence"},
+    }
+    return moment.type in type_groups.get(primary, set())
+
+
+def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int, hypothesis: BehaviourHypothesis | None) -> list[ReportTimelineItem]:
     items: list[ReportTimelineItem] = []
     for moment in moments:
+        if not _moment_supports_hypothesis(moment, hypothesis, evidence_ids):
+            continue
         if moment.start_ms is None or moment.end_ms <= moment.start_ms or (moment.confidence is not None and 0 < moment.confidence < 0.35):
             continue
         impact_values = list(moment.dimension_impact.values())
@@ -1349,10 +1600,18 @@ def _dimension_reports(scores: Scores, diagnostic: DiagnosticReasoning, evidence
     return reports
 
 
-def _hidden_cost(diagnosis: ReportDiagnosis, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float, evidence_cards: list[ReportEvidenceCard]) -> ReportHiddenCost:
+def _hidden_cost(diagnosis: ReportDiagnosis, diagnostic: DiagnosticReasoning, evidence_ids: list[str], confidence: float, evidence_cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> ReportHiddenCost:
     reasoning = diagnostic.hidden_cost_reasoning
     negative = _primary_negative(evidence_cards)
     behaviour = _card_behaviour(negative)
+    if hypothesis:
+        return ReportHiddenCost(
+            dimension=hypothesis.primary_dimension,
+            cost_id=reasoning.cost_id if reasoning and reasoning.cost_id else hypothesis.hypothesis_id,
+            consequence=f"The hidden cost follows from the same pattern: {_without_period(_lower_first(hypothesis.behaviour))}. {hypothesis.listener_consequence}",
+            evidence_ids=[card.evidence_id for card in hypothesis.supporting_cards] or evidence_ids,
+            confidence=hypothesis.confidence,
+        )
     if reasoning:
         linked = [item for item in reasoning.evidence_ids if item in evidence_ids] or evidence_ids
         consequence = _hidden_cost_sentence(reasoning.listener_effect)
@@ -1396,7 +1655,7 @@ def _expected_score_lift_label(primary, reasoning) -> str | None:
     return "low"
 
 
-def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard]) -> ReportHighestLeverageFix:
+def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> ReportHighestLeverageFix:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
     if primary and coaching:
@@ -1407,9 +1666,15 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
     issue = drill.title if drill else (reasoning.issue_id.replace("_", " ") if reasoning and reasoning.issue_id else "Practice focus")
     plain = drill.description if drill else (reasoning.plain_reason if reasoning else "Use the clearest supported practice focus from this recording.")
     duration = drill.estimated_duration_min if drill else None
-    focus_card = _primary_negative(evidence_cards) or _primary_positive(evidence_cards)
+    focus_card = (hypothesis.supporting_cards[0] if hypothesis and hypothesis.supporting_cards else None) or _primary_negative(evidence_cards) or _primary_positive(evidence_cards)
     behaviour = _card_behaviour(focus_card)
-    if focus_card and behaviour:
+    if hypothesis:
+        linked = [card.evidence_id for card in hypothesis.supporting_cards if card.evidence_id in evidence_ids] or linked
+        plain = f"The fastest improvement is to train the dominant pattern: {_lower_first(hypothesis.summary)}"
+        action_step = _sentence(hypothesis.coaching_target)
+        why = f"This drill was selected because the winning diagnosis is supported by {len(hypothesis.supporting_cards)} evidence item(s) and contradicted by {len(hypothesis.contradicting_cards)}."
+        success = f"The next recording should make this pattern less costly or more controlled: {_lower_first(hypothesis.behaviour)}"
+    elif focus_card and behaviour:
         plain = (
             f"The fastest improvement is to change the behaviour where {behaviour}."
             if focus_card.direction == "negative"
@@ -1438,7 +1703,7 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
     )
 
 
-def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, evidence_cards: list[ReportEvidenceCard]) -> ReportTrainingPrescription:
+def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, evidence_cards: list[ReportEvidenceCard], hypothesis: BehaviourHypothesis | None) -> ReportTrainingPrescription:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
     if primary and coaching:
@@ -1446,9 +1711,13 @@ def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, ev
     if drill:
         focus_card = _primary_negative(evidence_cards) or _primary_positive(evidence_cards)
         why_chosen = (
+            f"Chosen because it targets the winning diagnosis: {_without_period(hypothesis.summary)}."
+            if hypothesis
+            else (
             f"Chosen because the report's clearest trainable behaviour is: {_card_observation(focus_card)}."
             if focus_card
             else f"Chosen because this recording's strongest coachable listener-cost points to {', '.join(drill.target_dimensions)}."
+            )
         )
         return ReportTrainingPrescription(
             drill_id=drill.drill_id,
@@ -1466,7 +1735,11 @@ def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, ev
     return ReportTrainingPrescription(
         drill_id=fix.first_drill_id,
         title=fix.issue,
-        why_chosen=f"Chosen because the clearest trainable behaviour is: {fix.plain_english}",
+        why_chosen=(
+            f"Chosen because it targets the winning diagnosis: {_without_period(hypothesis.summary)}."
+            if hypothesis
+            else f"Chosen because the clearest trainable behaviour is: {fix.plain_english}"
+        ),
         instructions=[fix.action_step or "Practice the target behaviour once, then retest on the same prompt."],
         target_metrics=fix.target_dimensions,
         target_dimensions=fix.target_dimensions,
@@ -1594,16 +1867,22 @@ def build_generated_report(
         duration_ms,
         audio_quality,
     )
+    hypothesis = _winning_hypothesis(evidence_cards, confidence)
+    evidence_cards = _hypothesis_evidence_cards(evidence_cards, hypothesis)
     evidence_ids = [item.evidence_id for item in evidence_cards[:5]]
+    if hypothesis:
+        hypothesis = _winning_hypothesis(evidence_cards, confidence)
     if diagnostic_reasoning.primary_diagnosis and diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids:
         evidence_ids = _visible_evidence_ids(diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids, evidence_cards)
     dims = _ordered_dimensions(scores)
     strongest = DIMENSION_LABELS[dims[0][0]]
     limiter = DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
     authority_type = _authority_type(scores, evidence_ids, confidence)
-    mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids, evidence_cards)
-    diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids, evidence_cards)
-    perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, confidence, evidence_ids, evidence_cards), profile.scenario_id)
+    diagnosis_confidence = min(confidence, hypothesis.confidence if hypothesis else confidence)
+    confidence_label = _confidence_label(diagnosis_confidence)
+    mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids, evidence_cards, hypothesis)
+    diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids, evidence_cards, hypothesis)
+    perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, diagnosis_confidence, evidence_ids, evidence_cards, hypothesis), profile.scenario_id)
     weak_sample = bool(duration_ms and duration_ms < 25000) or confidence < 0.45 or not audio_quality.usable
     if weak_sample:
         limited_text = "This sample does not contain enough reliable evidence for a strong psychological read. Treat the result as a light directional signal and retest with a longer, clearer recording."
@@ -1624,11 +1903,11 @@ def build_generated_report(
                     )
                 }
             )
-    timeline = _timeline(moments, evidence_ids, duration_ms)
+    timeline = _timeline(moments, evidence_ids, duration_ms, hypothesis)
     dimension_reports = _dimension_reports(scores, diagnostic_reasoning, evidence_ids, confidence, evidence_cards)
-    hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, confidence, evidence_cards)
-    fix = _highest_leverage_fix(coaching_engine, diagnostic_reasoning, evidence_ids, evidence_cards)
-    training = _training(coaching_engine, fix, evidence_cards)
+    hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, diagnosis_confidence, evidence_cards, hypothesis)
+    fix = _highest_leverage_fix(coaching_engine, diagnostic_reasoning, evidence_ids, evidence_cards, hypothesis)
+    training = _training(coaching_engine, fix, evidence_cards, hypothesis)
     retest = _retest(fix, duration_ms)
     appendix = _technical_appendix(metrics, scores, audio_quality, evidence_ids)
     share_card = _share_card(scores, authority_type, mirror, diagnosis)
@@ -1637,6 +1916,8 @@ def build_generated_report(
         suppressed_traits=psychological_inference.suppressed_traits,
         reasons=list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons + diagnostic_reasoning.uncertainty.reasons)),
     )
+    if hypothesis and hypothesis.secondary_summary:
+        report_uncertainty.reasons.append(f"Multiple behavioural explanations remain plausible; leading diagnosis: {_without_period(hypothesis.summary)}; secondary: {_without_period(hypothesis.secondary_summary)}")
     if duration_ms and duration_ms < 25000:
         report_uncertainty.reasons.append("Short recording limits full report confidence")
     report = AuthorityReport(

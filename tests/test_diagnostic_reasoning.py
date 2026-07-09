@@ -174,11 +174,8 @@ def test_report_generation_maps_reasoning_without_gpt_decisions():
     assert report.primary_diagnosis == reasoning.primary_diagnosis
     assert report.diagnosis.core_behavioural_pattern
     assert report.diagnosis.core_behavioural_pattern != reasoning.primary_diagnosis.diagnosis_id
-    pattern = report.diagnosis.core_behavioural_pattern.lower()
-    assert any(
-        pattern in value.lower()
-        for item in report.evidence_chain
-        for value in (item.signal, item.what_happened)
-    )
+    pattern = report.diagnosis.core_behavioural_pattern.lower().rstrip(".")
+    assert pattern in report.mirror.headline.lower()
+    assert pattern in report.highest_leverage_fix.plain_english.lower()
     assert report.hidden_cost_reasoning == reasoning.hidden_cost_reasoning
     assert report.highest_leverage_reasoning == reasoning.highest_leverage_reasoning

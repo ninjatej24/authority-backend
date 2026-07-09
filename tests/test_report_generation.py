@@ -287,13 +287,7 @@ def test_technical_appendix_keeps_raw_metric_style_values():
 
 def test_major_sections_trace_to_observable_behaviour():
     report = _generated_report()
-    observed_fragments = [
-        item.signal.split(",", 1)[0].lower()
-        for item in report.evidence_chain
-    ] + [
-        item.what_happened.split(",", 1)[0].lower()
-        for item in report.evidence_chain
-    ]
+    diagnosis = report.diagnosis.core_pattern.lower().rstrip(".")
 
     major_copy = " ".join(
         value or ""
@@ -306,7 +300,7 @@ def test_major_sections_trace_to_observable_behaviour():
             report.training_prescription.why_chosen,
         ]
     ).lower()
-    assert any(fragment and fragment in major_copy for fragment in observed_fragments)
+    assert diagnosis in major_copy
 
 
 def test_evidence_signals_are_observations_not_template_labels():
@@ -347,3 +341,32 @@ def test_user_facing_copy_has_no_internal_ids_or_generic_placeholders():
     ]
     for phrase in forbidden:
         assert phrase not in copy
+
+
+def test_report_organizes_around_one_dominant_diagnosis():
+    report = _generated_report()
+    diagnosis = report.diagnosis.core_pattern.lower().rstrip(".")
+
+    assert diagnosis
+    assert diagnosis in report.mirror.headline.lower()
+    assert diagnosis in report.mirror.identity_read.lower()
+    assert diagnosis in report.highest_leverage_fix.plain_english.lower()
+    assert diagnosis in report.training_prescription.why_chosen.lower()
+
+
+def test_evidence_and_timeline_are_filtered_to_winning_story():
+    report = _generated_report()
+    dimensions = {item.related_dimension for item in report.evidence_chain}
+
+    assert 1 <= len(dimensions) <= 3
+    assert len(report.evidence_chain) <= 5
+    assert all(item.evidence_ids for item in report.timeline)
+    assert all(set(item.evidence_ids).issubset({card.evidence_id for card in report.evidence_chain}) for item in report.timeline)
+
+
+def test_competing_hypotheses_reduce_certainty_instead_of_disappearing():
+    report = _generated_report()
+
+    if any("secondary:" in reason for reason in report.uncertainty.reasons):
+        assert report.mirror.confidence_label in {"medium", "medium_high", "low"}
+        assert "secondary explanation" in report.mirror.identity_read.lower()
