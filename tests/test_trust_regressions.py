@@ -93,7 +93,8 @@ def test_whisper_removed_fillers_still_allows_acoustic_hesitation_copy():
     report = _generated_report(metrics=metrics, inference=inference, diagnostic_reasoning=diagnostic)
     text = " ".join(_report_user_facing_strings(report)).lower()
 
-    assert "paused while searching for your next idea" in text
+    assert "delivery exposes the moment where the next words are being found" in text
+    assert "attention briefly moves away from the idea" in text
     assert "zero fillers" not in text
 
 

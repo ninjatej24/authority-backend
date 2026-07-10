@@ -34,6 +34,14 @@ FORBIDDEN_PHRASES = {
     "observed as",
     "hypothesis",
     "backend",
+    "good communication",
+    "effective communication",
+    "strong communication",
+    "clear communication",
+    "powerful communication",
+    "better communication",
+    "repeatable strength",
+    "local change in control",
 }
 
 
@@ -485,3 +493,91 @@ def test_three_realistic_fixtures_produce_different_reports_and_coaching():
     }
     assert len({thin.training_prescription.drill_id, hesitation.training_prescription.drill_id, close.training_prescription.drill_id}) == 3
     assert len({thin.mirror.headline, hesitation.mirror.headline, close.mirror.headline}) == 3
+
+
+def test_strength_copy_references_concrete_listener_behaviour():
+    report = _report("hesitation")
+    strengths = [card for card in report.evidence_chain if card.direction == "positive"]
+
+    assert strengths
+    strength_text = " ".join([strengths[0].signal, strengths[0].what_happened, strengths[0].listener_interpretation]).lower()
+    assert "repeatable strength" not in strength_text
+    assert "listener" in strength_text
+    assert any(word in strength_text for word in ["opening", "pace", "example", "ending", "pause", "emphasis", "frame"])
+
+
+def test_timeline_forms_listener_perception_narrative():
+    report = _report("hesitation")
+
+    assert report.timeline
+    item = report.timeline[0]
+    assert "Expectation:" in item.summary
+    assert "Behaviour:" in item.summary
+    assert item.listener_interpretation.startswith("Interpretation:")
+    assert item.why_it_matters and "Authority impact:" in item.why_it_matters
+    assert item.why_it_matters and "Carry-forward:" in item.why_it_matters
+
+
+def test_evidence_cards_explain_listener_consequence_like_exhibits():
+    report = _report("thin_proof")
+
+    primary = report.evidence_chain[0]
+    assert primary.why_it_matters.startswith("Because ")
+    assert "listener" in primary.why_it_matters.lower()
+    assert "exhibit" in primary.why_it_matters.lower()
+    assert primary.listener_interpretation
+
+
+def test_transcript_insertions_are_grammatical_or_suppressed():
+    report = _report("weak_close")
+    text = " ".join(_strings(report)).lower()
+
+    assert "team moving and" not in text
+    assert "you said  " not in text
+    assert "and without turning" not in text
+
+
+def test_context_reads_use_distinct_listener_jobs():
+    report = _report("weak_close")
+    payload = report.perception_map.model_dump()
+    selected = {
+        key: value["text"]
+        for key, value in payload.items()
+        if key in {"professional_read", "leadership_read", "interview_read", "social_status_read"} and value
+    }
+
+    assert len(selected) >= 2
+    assert any("colleague" in text.lower() for text in selected.values())
+    assert any("leadership signal" in text.lower() for text in selected.values())
+    texts = list(selected.values())
+    for index, text in enumerate(texts):
+        assert all(_similarity(text, other) < 0.72 for other in texts[index + 1 :])
+
+
+def test_mirror_and_diagnosis_answer_different_listener_questions():
+    report = _report("thin_proof")
+
+    assert "gets the point early" in report.mirror.identity_read.lower()
+    assert "claim arrives before demonstration" in report.diagnosis.core_pattern.lower()
+    assert _similarity(report.mirror.identity_read, report.diagnosis.core_pattern) < 0.64
+
+
+def test_hidden_cost_and_fix_derive_from_primary_listener_state():
+    report = _report("hesitation")
+
+    assert "search for words" in report.hidden_cost.consequence.lower()
+    assert "pause before the next claim" in report.highest_leverage_fix.plain_english.lower()
+    assert _similarity(report.hidden_cost.consequence, report.highest_leverage_fix.plain_english) < 0.7
+
+
+def test_reports_from_different_recordings_are_measurably_different():
+    thin = _report("thin_proof")
+    hesitation = _report("hesitation")
+    close = _report("weak_close")
+
+    report_bodies = [
+        " ".join(_strings(report)).lower()
+        for report in (thin, hesitation, close)
+    ]
+    for index, body in enumerate(report_bodies):
+        assert all(_similarity(body, other) < 0.6 for other in report_bodies[index + 1 :])

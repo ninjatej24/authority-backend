@@ -220,6 +220,39 @@ class FactDiagnosis:
     fact_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ListenerState:
+    state_id: str
+    observation_id: str
+    source_fact_ids: tuple[str, ...]
+    start_ms: int | None
+    current_expectation: str
+    current_confidence: str
+    processing_load: str
+    credibility: str
+    certainty: str
+    engagement: str
+    attention: str
+    authority_signal: str
+    trust_signal: str
+    momentary_confusion: str
+    emotional_tension: str
+    predicted_next_reaction: str
+    perception_shift: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class ListenerPerceptionReconstruction:
+    states: tuple[ListenerState, ...]
+    primary_state: ListenerState | None
+    observation_confidence: float
+    diagnosis_confidence: float
+    perception_confidence: float
+    report_confidence: float
+    timeline_confidence: float
+
+
 def _dimension_scores(scores: Scores) -> dict[str, int]:
     return scores.dimension_scores.model_dump()
 
@@ -2572,9 +2605,55 @@ def _short_clause(text: str, max_words: int = 18) -> str:
     return candidate.strip(" ,;:.")
 
 
+_UNSAFE_CLAUSE_ENDINGS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "because",
+    "but",
+    "by",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "of",
+    "or",
+    "so",
+    "that",
+    "the",
+    "to",
+    "with",
+}
+
+
+def _safe_transcript_clause(text: str | None, max_words: int = 18) -> str | None:
+    candidate = _short_clause(text or "", max_words=max_words)
+    if not candidate:
+        return None
+    words = candidate.split()
+    if len(words) < 3:
+        return None
+    last = re.sub(r"[^a-z0-9']", "", words[-1].lower())
+    first = re.sub(r"[^a-z0-9']", "", words[0].lower())
+    if last in _UNSAFE_CLAUSE_ENDINGS or first in {"and", "but", "so", "because"}:
+        return None
+    if candidate.count("(") != candidate.count(")") or candidate.count('"') % 2:
+        return None
+    has_action_word = any(
+        re.search(r"(ed|ing|es|s)$", re.sub(r"[^a-z']", "", token.lower()))
+        or token.lower().strip(".,!?") in {"am", "are", "be", "being", "been", "can", "could", "did", "do", "does", "had", "has", "have", "is", "keeps", "make", "makes", "matter", "matters", "need", "needs", "should", "was", "were", "will", "would"}
+        for token in words
+    )
+    if not has_action_word:
+        return None
+    return candidate
+
+
 def _fact_phrase(fact: RecordingFact) -> str:
     if fact.user_safe and fact.transcript_text:
-        return _short_clause(fact.transcript_text, 16)
+        return _safe_transcript_clause(fact.transcript_text, 16) or ""
     return fact.observed_behavior.rstrip(".")
 
 
@@ -2582,7 +2661,7 @@ def _content_reference(fact: RecordingFact) -> str:
     phrase = _fact_phrase(fact)
     if fact.user_safe and fact.transcript_text and phrase:
         return f"you said {phrase}"
-    return _lower_first(phrase)
+    return _lower_first(phrase or fact.observed_behavior.rstrip("."))
 
 
 def _metric_summary(label: str, value: float | int | None, suffix: str = "") -> str:
@@ -3042,6 +3121,61 @@ def _observation_from_facts(
     )
 
 
+def _strength_title_and_pattern(facts: list[RecordingFact]) -> tuple[str, str, str]:
+    first_type = next((fact.fact_type for fact in facts), "")
+    fact_types = [fact.fact_type for fact in facts]
+    selected = first_type if first_type in {
+        "clear_opening_claim",
+        "pace_stabilization",
+        "concrete_example",
+        "reinforced_ending",
+        "decisive_ending",
+        "owned_pause",
+        "strong_emphasis",
+    } else next((fact_type for fact_type in fact_types if fact_type), "")
+    if selected == "clear_opening_claim":
+        return (
+            "Opening gives the listener the frame",
+            "The listener does not have to wonder what the answer is about.",
+            "That early direction should stay in place while the main limiter is trained.",
+        )
+    if selected == "pace_stabilization":
+        return (
+            "Pace gives the listener room",
+            "The pace settles enough for the listener to absorb the point.",
+            "That steadiness should be preserved while the main limiter is trained.",
+        )
+    if selected == "concrete_example":
+        return (
+            "Example makes the idea visible",
+            "The listener no longer has to imagine what the speaker means once the example appears.",
+            "That proof habit should remain attached to the main claim.",
+        )
+    if selected in {"reinforced_ending", "decisive_ending"}:
+        return (
+            "Ending leaves a final idea",
+            "The final stretch gives the listener a clear last thought to carry away.",
+            "That landing should be preserved while the earlier limiter is trained.",
+        )
+    if selected == "owned_pause":
+        return (
+            "Pauses read as control",
+            "The listener hears silence between thoughts rather than searching inside a thought.",
+            "That controlled spacing should stay intact during the next recording.",
+        )
+    if selected == "strong_emphasis":
+        return (
+            "Emphasis marks what matters",
+            "Key words receive enough contrast for the listener to notice the important idea.",
+            "That contrast should stay focused rather than becoming general intensity.",
+        )
+    return (
+        "One behaviour already helps the listener",
+        facts[0].observed_behavior if facts else "One supported behaviour gives the listener something stable.",
+        "Keep that supported behaviour while training the main limiter.",
+    )
+
+
 def _build_fact_observations(facts: list[RecordingFact]) -> list[FactObservation]:
     observations: list[FactObservation] = []
     clear = _facts_by_type(facts, "clear_opening_claim")
@@ -3120,12 +3254,18 @@ def _build_fact_observations(facts: list[RecordingFact]) -> list[FactObservation
     weak_close = _facts_by_type(facts, "abrupt_ending", "rising_ending")
     decisive = _facts_by_type(facts, "decisive_ending", "reinforced_ending")
     if weak_close:
-        close_ref = _content_reference(weak_close[0])
+        close_fact = weak_close[0]
+        safe_close = _safe_transcript_clause(close_fact.transcript_text, 16) if close_fact.user_safe else None
+        close_pattern = (
+            f"Near the end, you said {safe_close} without turning it into a clean final takeaway."
+            if safe_close
+            else "Near the end, the answer stopped before becoming a clean final takeaway."
+        )
         observations.append(
             _observation_from_facts(
                 "weak_close",
                 "The ending did not fully land",
-                f"Near the end, {close_ref} without turning into a clean final takeaway.",
+                close_pattern,
                 "The final impression can feel less settled than the answer's earlier direction.",
                 weak_close[:2],
                 ("Command", "Structure"),
@@ -3157,12 +3297,13 @@ def _build_fact_observations(facts: list[RecordingFact]) -> list[FactObservation
     strengths = _facts_by_type(facts, "strong_local_structure", "pace_stabilization", "owned_pause", "strong_emphasis", "clear_opening_claim", "reinforced_ending", "decisive_ending")
     if strengths:
         chosen = strengths[:3]
+        strength_title, strength_pattern, strength_effect = _strength_title_and_pattern(chosen)
         observations.append(
             _observation_from_facts(
                 "usable_strength",
-                "There is a repeatable strength to build from",
-                "The recording includes a controlled behaviour that should be preserved while the main limiter is trained.",
-                "The fix should keep that strength intact instead of treating the whole answer as broken.",
+                strength_title,
+                strength_pattern,
+                strength_effect,
                 chosen,
                 tuple(dict.fromkeys(dimension for fact in chosen for dimension in fact.related_dimensions)) or ("Clarity",),
                 0.42,
@@ -3242,6 +3383,178 @@ def _select_fact_diagnosis(
     )
 
 
+def _earliest_fact_start(observation: FactObservation, fact_lookup: dict[str, RecordingFact]) -> int | None:
+    starts = [
+        fact_lookup[fact_id].start_ms
+        for fact_id in observation.supporting_fact_ids
+        if fact_id in fact_lookup and fact_lookup[fact_id].start_ms is not None
+    ]
+    return min(starts) if starts else None
+
+
+def _listener_state_for_observation(
+    observation: FactObservation,
+    fact_lookup: dict[str, RecordingFact],
+    index: int,
+) -> ListenerState:
+    start_ms = _earliest_fact_start(observation, fact_lookup)
+    fact_ids = observation.supporting_fact_ids
+    if observation.observation_id == "thin_proof":
+        expectation = "The listener understands the claim and waits for proof."
+        confidence = "The point is understandable, but belief has not fully arrived."
+        processing = "Moderate: the listener is holding the claim open while searching for evidence."
+        credibility = "Credibility stalls until an example or concrete result appears."
+        certainty = "Certainty remains pending."
+        engagement = "Engagement depends on whether proof arrives quickly."
+        attention = "Attention stays on the gap between the claim and its demonstration."
+        authority = "Authority reads as organized but not yet proven."
+        trust = "Trust is being requested before it has been earned by evidence."
+        confusion = "Low confusion; the issue is proof, not basic comprehension."
+        tension = "Mild tension: the listener is waiting for the reason to believe."
+        reaction = "They wait for a specific situation, number, or named example."
+        shift = "Understanding arrives before conviction."
+    elif observation.observation_id == "hesitation_control":
+        expectation = "The listener expects the thought to keep moving cleanly."
+        confidence = "Confidence in the content can remain, but confidence in control dips."
+        processing = "Higher: attention splits between the idea and the search for wording."
+        credibility = "Credibility becomes less settled during the interruption."
+        certainty = "Certainty wavers while the delivery searches."
+        engagement = "Engagement is interrupted because delivery becomes the object of attention."
+        attention = "Attention shifts from what is being said to how it is being found."
+        authority = "Authority signal weakens at the exact moment control should stay quiet."
+        trust = "Trust in preparation becomes less automatic."
+        confusion = "Brief confusion appears around the interrupted stretch."
+        tension = "Tension rises because the listener can hear effort."
+        reaction = "They wait for the speaker to regain the sentence."
+        shift = "The listener briefly hears the work behind the answer."
+    elif observation.observation_id == "unclear_path":
+        expectation = "The listener expects a route through point, support, and close."
+        confidence = "Confidence is delayed because the path has to be assembled."
+        processing = "High: the listener spends effort sorting the answer."
+        credibility = "Credibility depends on whether the structure becomes visible soon."
+        certainty = "Certainty stays low until the main point is separated from support."
+        engagement = "Engagement becomes more fragile as the listener works."
+        attention = "Attention moves to organizing the answer instead of weighing the point."
+        authority = "Authority signal weakens because the speaker is not visibly leading the path."
+        trust = "Trust in the speaker's control drops before the content can be judged."
+        confusion = "Confusion rises around the answer route."
+        tension = "Tension is cognitive rather than emotional: the listener has to do extra sorting."
+        reaction = "They look for the sentence that tells them where the answer is going."
+        shift = "The listener has to build the structure the speaker did not supply."
+    elif observation.observation_id == "weak_close":
+        expectation = "The listener expects the final sentence to tell them what to keep."
+        confidence = "Confidence created earlier loses some finality."
+        processing = "Moderate: the listener has to decide whether the answer is finished."
+        credibility = "Credibility is not erased, but the last impression is softer."
+        certainty = "Certainty drops at the point where it should peak."
+        engagement = "Engagement ends without a clean final cue."
+        attention = "Attention moves to the unfinished edge of the answer."
+        authority = "Authority signal weakens because the ending does not close the loop."
+        trust = "Trust in the recommendation is less easy to carry away."
+        confusion = "Low to moderate: the listener understands the answer but not the final landing."
+        tension = "A small unresolved tension remains at the end."
+        reaction = "They mentally complete the ending instead of receiving it."
+        shift = "The final impression becomes less certain than the earlier answer."
+    elif observation.observation_id == "flat_presence":
+        expectation = "The listener expects the important idea to be marked."
+        confidence = "Confidence in meaning may remain, but memorability drops."
+        processing = "Moderate: the listener has to infer which words matter most."
+        credibility = "Credibility is steady but low in force."
+        certainty = "Certainty about priority is weaker."
+        engagement = "Engagement fades because the delivery does not create contrast."
+        attention = "Attention has fewer cues for what to hold onto."
+        authority = "Authority signal becomes quieter than the content needs."
+        trust = "Trust is not damaged; urgency is."
+        confusion = "Low confusion, but low salience."
+        tension = "Little emotional tension; the cost is attention."
+        reaction = "They understand the point without feeling a clear reason to remember it."
+        shift = "Meaning lands, but priority does not."
+    else:
+        expectation = "The listener expects the speaker to keep the useful behaviour available."
+        confidence = observation.observed_pattern
+        processing = "Lower: this behaviour makes the answer easier to receive."
+        credibility = "Credibility rises where the behaviour appears."
+        certainty = "Certainty improves around this supported behaviour."
+        engagement = "Engagement becomes easier to maintain."
+        attention = "Attention can stay on the idea."
+        authority = "Authority signal improves locally."
+        trust = "Trust becomes easier because the behaviour is visible."
+        confusion = "Confusion drops."
+        tension = "Tension reduces."
+        reaction = "They follow the next idea with less effort."
+        shift = observation.listener_effect
+    return ListenerState(
+        state_id=f"listener_state_{index + 1}",
+        observation_id=observation.observation_id,
+        source_fact_ids=fact_ids,
+        start_ms=start_ms,
+        current_expectation=expectation,
+        current_confidence=confidence,
+        processing_load=processing,
+        credibility=credibility,
+        certainty=certainty,
+        engagement=engagement,
+        attention=attention,
+        authority_signal=authority,
+        trust_signal=trust,
+        momentary_confusion=confusion,
+        emotional_tension=tension,
+        predicted_next_reaction=reaction,
+        perception_shift=shift,
+        confidence=round(observation.confidence * 0.72 + observation.distinctiveness * 0.18 + min(1.0, len(fact_ids) / 3) * 0.1, 2),
+    )
+
+
+def _reconstruct_listener_perception(
+    observations: list[FactObservation],
+    facts: list[RecordingFact],
+    diagnosis: FactDiagnosis | None,
+    report_confidence: float,
+) -> ListenerPerceptionReconstruction:
+    fact_lookup = _fact_map(facts)
+    relevant = [
+        observation
+        for observation in observations
+        if observation.supporting_fact_ids
+    ]
+    relevant.sort(
+        key=lambda observation: (
+            _earliest_fact_start(observation, fact_lookup) is None,
+            _earliest_fact_start(observation, fact_lookup) or 10**9,
+            -observation.importance,
+        )
+    )
+    states = tuple(_listener_state_for_observation(observation, fact_lookup, index) for index, observation in enumerate(relevant))
+    primary_state = None
+    if diagnosis:
+        primary_state = next((state for state in states if state.observation_id == diagnosis.diagnosis_id), None)
+    if primary_state is None and states:
+        primary_state = states[0]
+    observation_confidence = round(sum(item.confidence for item in observations) / max(len(observations), 1), 2)
+    diagnosis_confidence = diagnosis.confidence if diagnosis else min(report_confidence, 0.58)
+    perception_confidence = round(
+        sum(state.confidence for state in states) / max(len(states), 1) * 0.72 + diagnosis_confidence * 0.28,
+        2,
+    )
+    timestamped = [fact for fact in facts if _timestamps_safe(fact.start_ms, fact.end_ms, fact.timestamp_source)]
+    timeline_confidence = round(sum(fact.confidence for fact in timestamped) / max(len(timestamped), 1), 2) if timestamped else 0.0
+    return ListenerPerceptionReconstruction(
+        states=states,
+        primary_state=primary_state,
+        observation_confidence=observation_confidence,
+        diagnosis_confidence=round(diagnosis_confidence, 2),
+        perception_confidence=perception_confidence,
+        report_confidence=round(report_confidence, 2),
+        timeline_confidence=timeline_confidence,
+    )
+
+
+def _state_for(reconstruction: ListenerPerceptionReconstruction | None, observation_id: str) -> ListenerState | None:
+    if not reconstruction:
+        return None
+    return next((state for state in reconstruction.states if state.observation_id == observation_id), None)
+
+
 def _valid_drill_for_target(target_behavior: str, categories: tuple[str, ...], coaching: CoachingEngine | None) -> str | None:
     if not coaching:
         return None
@@ -3272,15 +3585,40 @@ def _evidence_card_from_fact_observation(
     facts: dict[str, RecordingFact],
     *,
     diagnosis: FactDiagnosis | None,
+    reconstruction: ListenerPerceptionReconstruction | None = None,
 ) -> ReportEvidenceCard:
     source_facts = [facts[fact_id] for fact_id in observation.supporting_fact_ids if fact_id in facts]
     first = source_facts[0] if source_facts else None
     timestamp = [first.start_ms, first.end_ms] if first and _timestamps_safe(first.start_ms, first.end_ms, first.timestamp_source) else None
     start_ms = timestamp[0] if timestamp else None
     end_ms = timestamp[1] if timestamp else None
-    link = "This is the clearest proof of the diagnosis." if diagnosis and observation.observation_id in diagnosis.primary_observation_ids else "This shows an important supporting behaviour in the recording."
-    what_happened = observation.observed_pattern
-    why = f"{observation.listener_effect} {link}"
+    state = _state_for(reconstruction, observation.observation_id)
+    first_fact = first.observed_behavior if first else observation.observed_pattern
+    link = (
+        "This is the exhibit that proves the main diagnosis."
+        if diagnosis and observation.observation_id in diagnosis.primary_observation_ids
+        else "This exhibit shows a supporting behaviour that changes the listener's read in this recording."
+    )
+    if observation.observation_id == "thin_proof":
+        what_happened = first_fact
+        why = "Because the listener receives the claim before receiving proof, belief has to rest on trust rather than demonstration."
+    elif observation.observation_id == "hesitation_control":
+        what_happened = first_fact
+        why = "Because the timing interruption is audible, attention briefly moves away from the idea and toward the delivery."
+    elif observation.observation_id == "unclear_path":
+        what_happened = first_fact
+        why = "Because the path is not separated cleanly, the listener spends effort organizing the answer instead of judging the point."
+    elif observation.observation_id == "weak_close":
+        what_happened = first_fact
+        why = "Because the final sentence does not close the loop, the listener has to supply the ending themselves."
+    elif observation.observation_id == "flat_presence":
+        what_happened = first_fact
+        why = "Because the important words are not marked, the listener gets meaning without a strong cue for what to remember."
+    else:
+        what_happened = observation.observed_pattern
+        why = state.perception_shift if state else observation.listener_effect
+    why = f"{why} {link}"
+    listener_interpretation = state.perception_shift if state else observation.listener_effect
     return ReportEvidenceCard(
         evidence_id=f"fact_ev_{observation.observation_id}",
         id=observation.observation_id,
@@ -3288,9 +3626,9 @@ def _evidence_card_from_fact_observation(
         dimension=observation.related_dimensions[0] if observation.related_dimensions else None,
         direction="positive" if observation.observation_id == "usable_strength" else "negative",
         signal=observation.title,
-        what_happened=what_happened,
-        why_it_matters=why,
-        listener_interpretation=observation.listener_effect,
+        what_happened=_clean_report_text(what_happened),
+        why_it_matters=_clean_report_text(why),
+        listener_interpretation=_clean_report_text(listener_interpretation),
         related_dimension=observation.related_dimensions[0] if observation.related_dimensions else "Authority",
         confidence=observation.confidence,
         source_metrics=[],
@@ -3301,7 +3639,12 @@ def _evidence_card_from_fact_observation(
     )
 
 
-def _fact_evidence_cards(observations: list[FactObservation], facts: list[RecordingFact], diagnosis: FactDiagnosis | None) -> list[ReportEvidenceCard]:
+def _fact_evidence_cards(
+    observations: list[FactObservation],
+    facts: list[RecordingFact],
+    diagnosis: FactDiagnosis | None,
+    reconstruction: ListenerPerceptionReconstruction | None = None,
+) -> list[ReportEvidenceCard]:
     fact_lookup = _fact_map(facts)
     primary_ids = set(diagnosis.primary_observation_ids if diagnosis else ())
     ordered = sorted(
@@ -3319,7 +3662,7 @@ def _fact_evidence_cards(observations: list[FactObservation], facts: list[Record
     for observation in ordered:
         if len(cards) >= 3:
             break
-        card = _evidence_card_from_fact_observation(observation, fact_lookup, diagnosis=diagnosis)
+        card = _evidence_card_from_fact_observation(observation, fact_lookup, diagnosis=diagnosis, reconstruction=reconstruction)
         normalized = _normalize_copy(" ".join([card.signal, card.what_happened, card.listener_interpretation]))
         if normalized in seen_text:
             continue
@@ -3346,18 +3689,105 @@ def _copy_similarity(a: str | None, b: str | None) -> float:
     return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
 
 
+_REPORT_FORBIDDEN_PHRASES = (
+    "concrete anchors",
+    "process detail",
+    "the message explained the idea more than it proved it",
+    "change the behaviour",
+    "useful signal is behavioural",
+    "the ceiling is",
+    "selected focus",
+    "deterministic drill",
+    "winning diagnosis",
+    "supported by x evidence items",
+    "observed as",
+    "hypothesis",
+    "backend",
+    "good communication",
+    "effective communication",
+    "strong communication",
+    "clear communication",
+    "powerful communication",
+    "better communication",
+    "repeatable strength",
+    "local change in control",
+)
+
+
+def _meaning_signature(text: str | None) -> str:
+    normalized = _normalize_copy(text)
+    tokens = set(normalized.split())
+    if {"proof", "claim"} & tokens and {"believe", "belief", "evidence", "example", "demonstration", "picture"} & tokens:
+        return "waiting_for_proof"
+    if {"hesitation", "search", "delivery", "wording", "interruption", "interrupted"} & tokens:
+        return "delivery_search_visible"
+    if {"route", "path", "assemble", "organize", "structure", "sorting"} & tokens:
+        return "listener_builds_route"
+    if {"ending", "final", "close", "takeaway", "recall", "carry"} & tokens:
+        return "unfinished_landing"
+    if {"emphasis", "contrast", "priority", "remember", "marked"} & tokens:
+        return "low_priority_signal"
+    if {"opening", "direction", "frame"} & tokens:
+        return "opening_orientation"
+    if {"pace", "settled", "timing", "pause", "silence"} & tokens:
+        return "timing_control"
+    return normalized[:80]
+
+
+def _semantic_similarity(a: str | None, b: str | None) -> float:
+    left = _meaning_signature(a)
+    right = _meaning_signature(b)
+    if left and right and left == right and left not in {_normalize_copy(a)[:80], _normalize_copy(b)[:80]}:
+        return 1.0
+    return _copy_similarity(a, b)
+
+
+def _contains_forbidden_report_phrase(text: str | None) -> bool:
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in _REPORT_FORBIDDEN_PHRASES)
+
+
 def _fact_evidence_ids(cards: list[ReportEvidenceCard]) -> list[str]:
     return [card.evidence_id for card in cards[:3]]
 
 
-def _fact_mirror(scores: Scores, authority_type: ReportAuthorityType, diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard], confidence_label: str) -> ReportMirror:
+def _fact_mirror(
+    scores: Scores,
+    authority_type: ReportAuthorityType,
+    diagnosis: FactDiagnosis | None,
+    cards: list[ReportEvidenceCard],
+    confidence_label: str,
+    reconstruction: ListenerPerceptionReconstruction | None = None,
+) -> ReportMirror:
     evidence_ids = _fact_evidence_ids(cards)
     strength = next((card for card in cards if card.direction == "positive"), None)
     if diagnosis:
-        strength_phrase = strength.what_happened if strength else "the recording gives you at least one stable behaviour to build from"
-        headline = f"{diagnosis.title}: {diagnosis.one_sentence_pattern}"
-        identity = f"{_sentence(strength_phrase)} The part holding the answer back is narrower: {diagnosis.listener_consequence}"
-        tension = f"{diagnosis.related_dimensions[0] if diagnosis.related_dimensions else 'Authority'} improves when {diagnosis.target_behavior.replace('_', ' ')} becomes visible in the answer"
+        state = reconstruction.primary_state if reconstruction else None
+        strength_phrase = strength.listener_interpretation if strength else "One supported behaviour makes the answer easier to receive."
+        if diagnosis.diagnosis_id == "thin_proof":
+            headline = "Understood Before Believed"
+            identity = "The listener gets the point early, then waits for proof that would make the claim believable."
+            tension = "What landed was direction; what held the answer back was the missing example after the claim."
+        elif diagnosis.diagnosis_id == "hesitation_control":
+            headline = "The Idea Survived The Search"
+            identity = "The listener can follow the content, but the delivery exposes the moment where the next words are being found."
+            tension = "What landed was the answer; what held it back was attention shifting from the idea to the search process."
+        elif diagnosis.diagnosis_id == "unclear_path":
+            headline = "The Listener Had To Build The Route"
+            identity = "The listener hears pieces of an answer, but has to assemble the point, support, and close themselves."
+            tension = "What landed was individual meaning; what held the answer back was the missing route through it."
+        elif diagnosis.diagnosis_id == "weak_close":
+            headline = "The Ending Softened The Answer"
+            identity = "The listener receives a usable answer, then the final moment gives them less certainty than the earlier structure created."
+            tension = "What landed was the plan; what held it back was the absence of a clean final takeaway."
+        elif diagnosis.diagnosis_id == "flat_presence":
+            headline = "Meaning Landed Without Priority"
+            identity = "The listener understands the words, but the delivery does not clearly mark which idea should stay with them."
+            tension = "What landed was comprehension; what held it back was low contrast on the important words."
+        else:
+            headline = diagnosis.title
+            identity = state.perception_shift if state else diagnosis.listener_consequence
+            tension = strength_phrase
     else:
         headline = "This recording shows a mostly controlled authority signal."
         identity = "The report found more repeatable strengths than limiting behaviours in this sample."
@@ -3375,14 +3805,36 @@ def _fact_mirror(scores: Scores, authority_type: ReportAuthorityType, diagnosis:
     )
 
 
-def _fact_report_diagnosis(scores: Scores, diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard]) -> ReportDiagnosis:
+def _fact_report_diagnosis(
+    scores: Scores,
+    diagnosis: FactDiagnosis | None,
+    cards: list[ReportEvidenceCard],
+    reconstruction: ListenerPerceptionReconstruction | None = None,
+) -> ReportDiagnosis:
     dims = _ordered_dimensions(scores)
     strongest = DIMENSION_LABELS[dims[0][0]]
     limiter = diagnosis.related_dimensions[0] if diagnosis and diagnosis.related_dimensions else DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
     evidence_ids = _fact_evidence_ids(cards)
     if diagnosis:
-        core = diagnosis.mechanism
-        consequence = diagnosis.listener_consequence
+        state = reconstruction.primary_state if reconstruction else None
+        if diagnosis.diagnosis_id == "thin_proof":
+            core = "The claim arrives before demonstration, so the listener has to believe the speaker before they can see the evidence."
+            consequence = "The listener understands the message, but conviction stays pending until a concrete example appears."
+        elif diagnosis.diagnosis_id == "hesitation_control":
+            core = "The sentence flow exposes the act of finding the next words, so delivery becomes part of the listener's task."
+            consequence = "The listener briefly evaluates control instead of staying fully inside the idea."
+        elif diagnosis.diagnosis_id == "unclear_path":
+            core = "The answer does not make its route visible early enough, so the listener has to sort the structure while listening."
+            consequence = "That extra sorting reduces the speaker's sense of control before the content gets a fair hearing."
+        elif diagnosis.diagnosis_id == "weak_close":
+            core = "The ending fails to convert the last idea into a final takeaway, so the listener is left to infer the landing."
+            consequence = "The final impression carries less certainty than the answer had earned earlier."
+        elif diagnosis.diagnosis_id == "flat_presence":
+            core = "The delivery gives similar weight to too many words, so the listener receives meaning without priority."
+            consequence = "The idea becomes easier to understand than to remember."
+        else:
+            core = diagnosis.mechanism
+            consequence = state.perception_shift if state else diagnosis.listener_consequence
     else:
         core = "No single limiter was strong enough to become the report's main diagnosis."
         consequence = "Treat this as a baseline and retest with a harder prompt to expose the next trainable edge."
@@ -3400,7 +3852,13 @@ def _fact_report_diagnosis(scores: Scores, diagnosis: FactDiagnosis | None, card
     )
 
 
-def _fact_perception_map(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard], confidence: float, scenario: str) -> ReportPerceptionMap:
+def _fact_perception_map(
+    diagnosis: FactDiagnosis | None,
+    cards: list[ReportEvidenceCard],
+    confidence: float,
+    scenario: str,
+    reconstruction: ListenerPerceptionReconstruction | None = None,
+) -> ReportPerceptionMap:
     evidence_ids = _fact_evidence_ids(cards)
     if not diagnosis:
         reads = {
@@ -3409,34 +3867,96 @@ def _fact_perception_map(diagnosis: FactDiagnosis | None, cards: list[ReportEvid
         if scenario == "interview":
             reads["interview_read"] = _read("Interview baseline", "In an interview, this would read as a usable baseline, with the next pass needing one sharper answer target.", evidence_ids, confidence)
         return ReportPerceptionMap(**reads)
-    reads: dict[str, ReportPerceptionRead] = {
-        "first_impression": _read("Specific first read", f"The opening read is shaped by this behaviour: {diagnosis.one_sentence_pattern}", evidence_ids, confidence),
-    }
+    reads: dict[str, ReportPerceptionRead] = {}
     if diagnosis.diagnosis_id == "thin_proof":
-        reads["professional_read"] = _read("Credible, but under-proven", "In a professional setting, the claim would be easy to understand but would need one example before it felt decision-ready.", evidence_ids, confidence)
-        reads["interview_read"] = _read("Answer needs proof", "In an interview, the answer would sound more convincing if the main benefit were followed by a specific situation showing it.", evidence_ids, confidence)
-        reads["persuasion_read"] = _read("Belief needs a handle", "For persuasion, the missing piece is not more explanation; it is one proof point the listener can picture.", evidence_ids, confidence)
+        reads["first_impression"] = _read("Opening assumption", "The listener assumes the answer has direction because the main idea appears early.", evidence_ids, confidence)
+        reads["professional_read"] = _read("Colleague read", "A colleague can understand the recommendation, but would pause before acting because the evidence has not arrived yet.", evidence_ids, confidence)
+        reads["interview_read"] = _read("Hiring read", "An interviewer hears self-awareness, then waits for the example that would prove the claim under pressure.", evidence_ids, confidence)
     elif diagnosis.diagnosis_id == "hesitation_control":
-        reads["emotional_read"] = _read("Pressure becomes audible", "Emotionally, the recording can sound like the speaker is managing the thought while speaking instead of arriving with it already held.", evidence_ids, confidence)
-        reads["professional_read"] = _read("Control fluctuates", "Professionally, the content may still be useful, but timing interruptions make parts of the delivery feel less settled.", evidence_ids, confidence)
-        reads["leadership_read"] = _read("Needs calmer ownership", "For leadership, the same words would land stronger if silence replaced the search moments before key claims.", evidence_ids, confidence)
+        reads["first_impression"] = _read("Opening assumption", "The listener expects a controlled answer, then notices the delivery working to catch the next phrase.", evidence_ids, confidence)
+        reads["professional_read"] = _read("Colleague read", "A colleague may still trust the substance, but the interrupted timing makes the speaker sound less prepared in the moment.", evidence_ids, confidence)
+        reads["leadership_read"] = _read("Leadership signal", "The leadership signal weakens when silence is not owned before the next claim.", evidence_ids, confidence)
+        reads["emotional_read"] = _read("Emotional experience", "Emotionally, the listener feels a small rise in pressure because the effort becomes audible.", evidence_ids, confidence)
     elif diagnosis.diagnosis_id == "unclear_path":
-        reads["professional_read"] = _read("More effort to follow", "In a work setting, listeners would need to assemble the answer path themselves instead of being led through it.", evidence_ids, confidence)
-        reads["leadership_read"] = _read("Control of the path matters", "For leadership, the issue is path control: the speaker needs to make the next step obvious before adding more detail.", evidence_ids, confidence)
+        reads["first_impression"] = _read("Opening assumption", "The listener waits for the route through the answer and does not receive it soon enough.", evidence_ids, confidence)
+        reads["professional_read"] = _read("Colleague read", "A colleague has to organize the point while listening, which slows judgment of the idea itself.", evidence_ids, confidence)
+        reads["leadership_read"] = _read("Leadership signal", "The leadership signal becomes weaker because the next step is not made obvious before more detail arrives.", evidence_ids, confidence)
     elif diagnosis.diagnosis_id == "weak_close":
-        reads["interview_read"] = _read("Close the answer harder", "In an interview, the answer would be remembered better if the last sentence became a takeaway instead of an exit.", evidence_ids, confidence)
-        reads["leadership_read"] = _read("Finality carries command", "For leadership, the final line needs to sound like a decision, not simply the point running out of road.", evidence_ids, confidence)
+        reads["first_impression"] = _read("Opening assumption", "The listener initially assumes the answer has a workable plan because the route is easy to follow.", evidence_ids, confidence)
+        reads["professional_read"] = _read("Colleague read", "A colleague hears a usable plan, but the final edge makes the next action feel less sealed.", evidence_ids, confidence)
+        reads["leadership_read"] = _read("Leadership signal", "The leadership signal drops at the end because finality is where command should peak.", evidence_ids, confidence)
+        reads["interview_read"] = _read("Hiring read", "An interviewer would remember the answer more easily if the last sentence became a completed takeaway.", evidence_ids, confidence)
+        reads["social_status_read"] = _read("Social read", "Socially, the speaker seems thoughtful but slightly less decisive because the listener has to finish the final beat.", evidence_ids, confidence)
     elif diagnosis.diagnosis_id == "flat_presence":
-        reads["emotional_read"] = _read("Controlled but low contrast", "Emotionally, the speaker sounds controlled, but the delivery does not clearly mark what the listener should feel as important.", evidence_ids, confidence)
-        reads["persuasion_read"] = _read("Attention needs contrast", "For persuasion, the same idea would pull harder if key words carried more vocal contrast.", evidence_ids, confidence)
+        reads["first_impression"] = _read("Opening assumption", "The listener assumes the speaker is controlled, then receives too few cues about which idea matters most.", evidence_ids, confidence)
+        reads["emotional_read"] = _read("Emotional experience", "Emotionally, the delivery feels low pressure, but also gives the listener little reason to lean in.", evidence_ids, confidence)
+        reads["persuasion_read"] = _read("Persuasion read", "For persuasion, the point needs contrast so the listener can feel the hierarchy of the idea.", evidence_ids, confidence)
 
     if scenario == "interview" and "interview_read" not in reads:
-        reads["interview_read"] = _read("Interview focus", "In an interview, the listener would mainly notice whether the answer gives a clear point before support.", evidence_ids, confidence)
-    ordered = list(reads.items())[:3]
+        reads["interview_read"] = _read("Hiring read", "In an interview, the listener looks for a complete answer shape: point, proof, and clean close.", evidence_ids, confidence)
+    ordered = list(reads.items())[:5]
     return ReportPerceptionMap(**{key: value for key, value in ordered})
 
 
-def _fact_timeline(moments: list[Moment], cards: list[ReportEvidenceCard], duration_ms: int, scenario: str) -> list[ReportTimelineItem]:
+def _timeline_story(moment_type: str, reconstruction: ListenerPerceptionReconstruction | None) -> tuple[str, str, str, str, str]:
+    primary = reconstruction.primary_state if reconstruction else None
+    expectation = primary.current_expectation if primary else "The listener is tracking whether the answer stays easy to follow."
+    if moment_type in {"strong_opening", "weak_opening"}:
+        return (
+            expectation,
+            "The opening either gives or delays the route into the answer.",
+            "The listener decides how much structure they will have to supply.",
+            "Authority rises when the route is visible and drops when the listener has to search for it.",
+            "That first read shapes how generously the rest of the answer is received.",
+        )
+    if moment_type in {"hesitation_cluster", "filler_cluster", "confidence_drop", "rushing_moment"}:
+        return (
+            expectation,
+            "Delivery control becomes less steady in this stretch.",
+            "The listener briefly notices the delivery instead of only the idea.",
+            "Authority drops because control is being evaluated in real time.",
+            "The next sentence has to re-earn ease.",
+        )
+    if moment_type in {"confidence_recovery", "most_composed_moment", "pause_ownership_moment"}:
+        return (
+            expectation,
+            "Timing becomes more settled here.",
+            "The listener can return attention to the point.",
+            "Authority rises because the delivery stops asking for attention.",
+            "The following idea becomes easier to trust.",
+        )
+    if moment_type in {"weak_closing", "strong_closing"}:
+        return (
+            "The listener expects the ending to tell them what to carry away.",
+            "The final stretch either lands the takeaway or leaves the edge unfinished.",
+            "The listener decides whether the answer feels complete.",
+            "Authority depends on whether certainty peaks at the end.",
+            "That final impression is what the listener carries forward.",
+        )
+    if moment_type in {"monotone_stretch", "high_presence_moment", "most_persuasive_moment"}:
+        return (
+            expectation,
+            "Emphasis changes how clearly the important words stand out.",
+            "The listener either gets a priority cue or has to infer it.",
+            "Authority rises when vocal contrast marks the point.",
+            "The marked idea becomes easier to remember.",
+        )
+    return (
+        expectation,
+        "A local behaviour changes how the answer is received.",
+        "The listener updates their read of control in this stretch.",
+        "Authority changes because the delivery pattern changes.",
+        "That local read carries into the next part of the answer.",
+    )
+
+
+def _fact_timeline(
+    moments: list[Moment],
+    cards: list[ReportEvidenceCard],
+    duration_ms: int,
+    scenario: str,
+    reconstruction: ListenerPerceptionReconstruction | None = None,
+) -> list[ReportTimelineItem]:
     if duration_ms and duration_ms < 25000:
         return []
     if scenario == "benchmark":
@@ -3474,6 +3994,7 @@ def _fact_timeline(moments: list[Moment], cards: list[ReportEvidenceCard], durat
         if moment.timestamp_source not in {"real", "segment"}:
             continue
         headline, summary = label_map[moment.type]
+        expectation, behaviour, interpretation, authority_impact, carry_forward = _timeline_story(moment.type, reconstruction)
         linked = [evidence_id for evidence_id in evidence_ids if evidence_id in set(moment.supporting_evidence_ids)] or evidence_ids[:1]
         items.append(
             ReportTimelineItem(
@@ -3481,9 +4002,9 @@ def _fact_timeline(moments: list[Moment], cards: list[ReportEvidenceCard], durat
                 type=moment.type,
                 priority=moment.priority,
                 headline=headline,
-                summary=summary,
-                listener_interpretation=moment.listener_interpretation or "Listeners hear this as a local shift in the answer.",
-                why_it_matters=moment.why_it_matters or "Local shifts matter because they show where the recording changes.",
+                summary=_clean_report_text(f"Expectation: {expectation} Behaviour: {summary if summary else behaviour}"),
+                listener_interpretation=_clean_report_text(f"Interpretation: {interpretation}"),
+                why_it_matters=_clean_report_text(f"Authority impact: {authority_impact} Carry-forward: {carry_forward}"),
                 dimension_impact=moment.dimension_impact,
                 confidence=moment.confidence,
                 start_ms=moment.start_ms,
@@ -3562,23 +4083,23 @@ def _fact_hidden_cost(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenc
         dimension = "Authority"
         cost_id = "baseline_plateau"
     elif diagnosis.diagnosis_id == "thin_proof":
-        consequence = "The downstream cost is credibility leakage: people may accept the topic but hesitate to act because the claim has not been made concrete."
+        consequence = "The quiet loss is commitment: the listener can agree with the topic and still withhold belief because no proof lets them picture it."
         dimension = "Persuasion"
         cost_id = "credibility_leakage"
     elif diagnosis.diagnosis_id == "hesitation_control":
-        consequence = "The downstream cost is pressure leakage: the listener hears the work of finding the answer as much as the answer itself."
+        consequence = "The quiet loss is ease: the listener spends attention on the search for words that should have stayed invisible."
         dimension = "Composure"
         cost_id = "pressure_leakage"
     elif diagnosis.diagnosis_id == "unclear_path":
-        consequence = "The downstream cost is effort: the listener spends attention reconstructing the path instead of weighing the point."
+        consequence = "The quiet loss is judgment speed: the listener cannot evaluate the point until they have built the route through it."
         dimension = "Structure"
         cost_id = "listener_effort"
     elif diagnosis.diagnosis_id == "weak_close":
-        consequence = "The downstream cost is recency: the last impression carries less certainty than the earlier answer created."
+        consequence = "The quiet loss is recall: the listener leaves with a softer final idea than the answer had earned."
         dimension = "Command"
         cost_id = "recency_loss"
     else:
-        consequence = "The downstream cost is memorability: the listener can follow the words without feeling which idea should stay with them."
+        consequence = "The quiet loss is priority: the listener can follow the words without knowing which one deserves to stay."
         dimension = "Presence"
         cost_id = "memorability_loss"
     return ReportHiddenCost(dimension=dimension, cost_id=cost_id, consequence=consequence, evidence_ids=evidence_ids, confidence=confidence)
@@ -3751,7 +4272,7 @@ def _apply_report_repetition_guard(report: AuthorityReport) -> AuthorityReport:
                 kept[key] = None
                 continue
             text = value["text"]
-            if any(_copy_similarity(text, existing) >= 0.72 for existing in prior):
+            if _contains_forbidden_report_phrase(text) or any(_semantic_similarity(text, existing) >= 0.72 for existing in prior):
                 kept[key] = None
                 continue
             prior.append(text)
@@ -3762,6 +4283,8 @@ def _apply_report_repetition_guard(report: AuthorityReport) -> AuthorityReport:
     for card in report.evidence_chain:
         merged = _normalize_copy(" ".join([card.signal, card.what_happened, card.why_it_matters]))
         if merged in seen:
+            continue
+        if any(_contains_forbidden_report_phrase(text) for text in [card.signal, card.what_happened, card.why_it_matters, card.listener_interpretation]):
             continue
         seen.add(merged)
         cards.append(card)
@@ -3810,17 +4333,18 @@ def _fact_led_report(
     )
     observations = _build_fact_observations(facts)
     diagnosis_model = _select_fact_diagnosis(observations, facts, coaching_engine, confidence, audio_quality)
-    cards = _fact_evidence_cards(observations, facts, diagnosis_model)
+    reconstruction = _reconstruct_listener_perception(observations, facts, diagnosis_model, confidence)
+    cards = _fact_evidence_cards(observations, facts, diagnosis_model, reconstruction)
     if not cards:
         cards = [_insufficient_evidence_card(confidence, audio_quality)]
     evidence_ids = _fact_evidence_ids(cards)
     authority_type = _authority_type(scores, evidence_ids, confidence)
     diagnosis_confidence = diagnosis_model.confidence if diagnosis_model else min(confidence, 0.58)
     confidence_label = _confidence_label(diagnosis_confidence)
-    mirror = _fact_mirror(scores, authority_type, diagnosis_model, cards, confidence_label)
-    diagnosis = _fact_report_diagnosis(scores, diagnosis_model, cards)
-    perception = _fact_perception_map(diagnosis_model, cards, diagnosis_confidence, scenario)
-    timeline = _fact_timeline(moments, cards, duration_ms, scenario)
+    mirror = _fact_mirror(scores, authority_type, diagnosis_model, cards, confidence_label, reconstruction)
+    diagnosis = _fact_report_diagnosis(scores, diagnosis_model, cards, reconstruction)
+    perception = _fact_perception_map(diagnosis_model, cards, diagnosis_confidence, scenario, reconstruction)
+    timeline = _fact_timeline(moments, cards, duration_ms, scenario, reconstruction)
     dimension_reports = _fact_dimension_reports(scores, facts, cards, confidence)
     hidden_cost = _fact_hidden_cost(diagnosis_model, cards, diagnosis_confidence)
     fix = _fact_highest_fix(diagnosis_model, coaching_engine, cards)
