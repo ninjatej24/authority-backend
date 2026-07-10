@@ -868,6 +868,7 @@ class ReportEvidenceCard(BaseModel):
     related_dimension: str
     confidence: float
     source_metrics: list[str] = Field(default_factory=list)
+    recording_fact_ids: list[str] = Field(default_factory=list)
     start_ms: int | None = None
     end_ms: int | None = None
     timestamp: list[int] | None = None

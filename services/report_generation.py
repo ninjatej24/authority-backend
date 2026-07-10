@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from schemas import (
@@ -35,6 +36,9 @@ from schemas import (
     ReportTrainingPrescription,
     ReportValidation,
     Scores,
+    Transcript,
+    TranscriptSegment,
+    TranscriptWord,
     Uncertainty,
 )
 from services.scenario_profiles import get_scenario_profile, major_weight_changes
@@ -162,6 +166,58 @@ class BehaviourDiagnosis:
     fix_category: str
     drill_id: str | None
     uncertainty_note: str | None = None
+
+
+@dataclass(frozen=True)
+class RecordingFact:
+    fact_id: str
+    fact_type: str
+    source: str
+    start_ms: int | None = None
+    end_ms: int | None = None
+    transcript_text: str | None = None
+    observed_behavior: str = ""
+    measurement_summary: str | None = None
+    related_dimensions: tuple[str, ...] = ()
+    confidence: float = 0.0
+    timestamp_source: str = "estimated"
+    supporting_metric_ids: tuple[str, ...] = ()
+    contradictions: tuple[str, ...] = ()
+    user_safe: bool = True
+
+
+@dataclass(frozen=True)
+class FactObservation:
+    observation_id: str
+    title: str
+    observed_pattern: str
+    supporting_fact_ids: tuple[str, ...]
+    listener_effect: str
+    related_dimensions: tuple[str, ...]
+    confidence: float
+    importance: float
+    trainability: float
+    distinctiveness: float
+    contradiction_penalty: float
+    target_behavior: str
+    recommended_drill_categories: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FactDiagnosis:
+    diagnosis_id: str
+    title: str
+    one_sentence_pattern: str
+    mechanism: str
+    listener_consequence: str
+    primary_observation_ids: tuple[str, ...]
+    secondary_observation_ids: tuple[str, ...]
+    related_dimensions: tuple[str, ...]
+    confidence: float
+    uncertainty_note: str | None
+    target_behavior: str
+    recommended_drill_id: str | None
+    fact_ids: tuple[str, ...]
 
 
 def _dimension_scores(scores: Scores) -> dict[str, int]:
@@ -2378,10 +2434,10 @@ def _insufficient_report(
         primary_diagnosis=None,
         secondary_diagnosis=None,
         contradictions=diagnostic_reasoning.contradictions,
-        hidden_cost_reasoning=diagnostic_reasoning.hidden_cost_reasoning,
+        hidden_cost_reasoning=None,
         dimension_reasoning={},
         trait_reasoning=diagnostic_reasoning.trait_reasoning,
-        highest_leverage_reasoning=diagnostic_reasoning.highest_leverage_reasoning,
+        highest_leverage_reasoning=None,
         coaching_engine=coaching_engine,
         uncertainty=report_uncertainty,
     )
@@ -2441,6 +2497,1390 @@ def _reconciled_diagnostic_reasoning(diagnostic: DiagnosticReasoning, diagnosis_
     )
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _words_confidence(words: list[TranscriptWord]) -> float | None:
+    values = [word.confidence for word in words if word.confidence is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _transcript_safe(transcript: Transcript | None) -> bool:
+    if not transcript or not transcript.full_text.strip():
+        return False
+    if transcript.overall_asr_confidence is not None and transcript.overall_asr_confidence < 0.65:
+        return False
+    word_conf = _words_confidence(transcript.words)
+    return word_conf is None or word_conf >= 0.65
+
+
+def _timestamps_safe(start_ms: int | None, end_ms: int | None, timestamp_source: str | None) -> bool:
+    return (
+        start_ms is not None
+        and end_ms is not None
+        and end_ms > start_ms
+        and (timestamp_source or "estimated") in {"real", "segment"}
+    )
+
+
+def _transcript_window(words: list[TranscriptWord], start_ms: int | None, end_ms: int | None) -> str | None:
+    if start_ms is None or end_ms is None:
+        return None
+    selected = [word.text for word in words if word.end_ms >= start_ms and word.start_ms <= end_ms]
+    text = " ".join(selected).strip()
+    return text or None
+
+
+def _segment_by_role(transcript: Transcript | None, role: str) -> TranscriptSegment | None:
+    if not transcript:
+        return None
+    return next((segment for segment in transcript.segments if segment.role == role), None)
+
+
+def _opening_text(transcript: Transcript | None) -> str:
+    segment = _segment_by_role(transcript, "opening")
+    if segment and segment.text.strip():
+        return segment.text.strip()
+    return " ".join((transcript.full_text if transcript else "").split()[:22]).strip()
+
+
+def _closing_text(transcript: Transcript | None) -> str:
+    segment = _segment_by_role(transcript, "closing")
+    if segment and segment.text.strip():
+        return segment.text.strip()
+    return " ".join((transcript.full_text if transcript else "").split()[-22:]).strip()
+
+
+def _segment_timing(segment: TranscriptSegment | None) -> tuple[int | None, int | None, str]:
+    if not segment:
+        return None, None, "estimated"
+    return segment.start_ms, segment.end_ms, segment.timestamp_source
+
+
+def _short_clause(text: str, max_words: int = 18) -> str:
+    cleaned = " ".join((text or "").replace("\n", " ").split()).strip(" ,;:")
+    if not cleaned:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+|\b(?:but|because|so|and then)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)
+    candidate = parts[0].strip(" ,;:")
+    words = candidate.split()
+    if len(words) > max_words:
+        candidate = " ".join(words[:max_words])
+    return candidate.strip(" ,;:.")
+
+
+def _fact_phrase(fact: RecordingFact) -> str:
+    if fact.user_safe and fact.transcript_text:
+        return _short_clause(fact.transcript_text, 16)
+    return fact.observed_behavior.rstrip(".")
+
+
+def _content_reference(fact: RecordingFact) -> str:
+    phrase = _fact_phrase(fact)
+    if fact.user_safe and fact.transcript_text and phrase:
+        return f"you said {phrase}"
+    return _lower_first(phrase)
+
+
+def _metric_summary(label: str, value: float | int | None, suffix: str = "") -> str:
+    if value is None:
+        return label
+    if isinstance(value, float):
+        if abs(value) >= 10:
+            rendered = f"{value:.0f}"
+        else:
+            rendered = f"{value:.2f}".rstrip("0").rstrip(".")
+    else:
+        rendered = str(value)
+    return f"{label}: {rendered}{suffix}"
+
+
+def _add_fact(
+    facts: list[RecordingFact],
+    counters: dict[str, int],
+    *,
+    fact_type: str,
+    source: str,
+    observed_behavior: str,
+    related_dimensions: tuple[str, ...],
+    confidence: float,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    transcript_text: str | None = None,
+    measurement_summary: str | None = None,
+    timestamp_source: str = "estimated",
+    supporting_metric_ids: tuple[str, ...] = (),
+    contradictions: tuple[str, ...] = (),
+    user_safe: bool = True,
+) -> None:
+    counters[fact_type] = counters.get(fact_type, 0) + 1
+    facts.append(
+        RecordingFact(
+            fact_id=f"{fact_type}_{counters[fact_type]}",
+            fact_type=fact_type,
+            source=source,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            transcript_text=transcript_text.strip() if transcript_text else None,
+            observed_behavior=_sentence(observed_behavior),
+            measurement_summary=measurement_summary,
+            related_dimensions=related_dimensions,
+            confidence=round(_clamp01(confidence), 2),
+            timestamp_source=timestamp_source,
+            supporting_metric_ids=supporting_metric_ids,
+            contradictions=contradictions,
+            user_safe=user_safe,
+        )
+    )
+
+
+def _repeated_phrase(text: str) -> str | None:
+    tokens = [re.sub(r"[^a-z0-9']", "", token.lower()) for token in text.split()]
+    tokens = [token for token in tokens if token and len(token) > 2]
+    if len(tokens) < 8:
+        return None
+    for size in (4, 3, 2):
+        counts: dict[tuple[str, ...], int] = {}
+        for index in range(0, len(tokens) - size + 1):
+            gram = tuple(tokens[index:index + size])
+            if any(token in {"the", "and", "that", "this", "with", "from"} for token in gram):
+                continue
+            counts[gram] = counts.get(gram, 0) + 1
+        repeated = [gram for gram, count in counts.items() if count >= 2]
+        if repeated:
+            return " ".join(repeated[0])
+    return None
+
+
+def _build_recording_fact_ledger(
+    *,
+    transcript: Transcript | None,
+    metrics: Metrics,
+    psychological_inference: PsychologicalInference,
+    moments: list[Moment],
+    audio_quality: AudioQuality,
+    duration_ms: int,
+    base_confidence: float,
+) -> list[RecordingFact]:
+    del psychological_inference
+    facts: list[RecordingFact] = []
+    counters: dict[str, int] = {}
+    text_safe = _transcript_safe(transcript)
+    text = (transcript.full_text if transcript else "").strip()
+    opening = _opening_text(transcript)
+    closing = _closing_text(transcript)
+    opening_segment = _segment_by_role(transcript, "opening")
+    closing_segment = _segment_by_role(transcript, "closing")
+    opening_start, opening_end, opening_ts = _segment_timing(opening_segment)
+    closing_start, closing_end, closing_ts = _segment_timing(closing_segment)
+    metric_conf = min(base_confidence or 0.65, 0.88)
+
+    if text_safe and opening and (metrics.linguistic.opening_strength_score or 0) >= 0.7:
+        claim = _short_clause(opening)
+        _add_fact(
+            facts,
+            counters,
+            fact_type="clear_opening_claim",
+            source="transcript",
+            start_ms=opening_start,
+            end_ms=opening_end,
+            transcript_text=claim,
+            observed_behavior=f"The answer established its direction early with the idea: {claim}.",
+            related_dimensions=("Structure", "Command"),
+            confidence=min(metric_conf + 0.04, 0.92),
+            timestamp_source=opening_ts,
+            supporting_metric_ids=("linguistic.opening_strength_score",),
+            user_safe=True,
+        )
+    elif text_safe and opening and (metrics.linguistic.opening_strength_score or 1) <= 0.45:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="delayed_main_point",
+            source="transcript",
+            start_ms=opening_start,
+            end_ms=opening_end,
+            transcript_text=opening,
+            observed_behavior="The opening used runway before giving the listener a clear main point.",
+            related_dimensions=("Structure", "Clarity"),
+            confidence=metric_conf,
+            timestamp_source=opening_ts,
+            supporting_metric_ids=("linguistic.opening_strength_score",),
+            user_safe=True,
+        )
+
+    has_example = bool(re.search(r"\b(for example|such as|like when|when I|when we|for instance)\b|\b\d+\b", text, re.IGNORECASE))
+    if text_safe and text and not has_example and (
+        (metrics.linguistic.specificity_score is not None and metrics.linguistic.specificity_score <= 0.34)
+        or (metrics.linguistic.concreteness_score is not None and metrics.linguistic.concreteness_score <= 0.32)
+    ):
+        claim = _short_clause(opening or text, 22)
+        _add_fact(
+            facts,
+            counters,
+            fact_type="claim_without_proof",
+            source="transcript",
+            start_ms=opening_start,
+            end_ms=opening_end,
+            transcript_text=claim,
+            observed_behavior=f"The answer states the idea {claim} without giving a concrete situation, example, number, or named detail to prove it.",
+            related_dimensions=("Persuasion", "Clarity", "Structure"),
+            confidence=min(metric_conf + 0.08, 0.9),
+            timestamp_source=opening_ts,
+            supporting_metric_ids=("linguistic.specificity_score", "linguistic.concreteness_score"),
+            user_safe=True,
+        )
+    if text_safe and text and has_example:
+        match = re.search(r"\b(for example|such as|like when|when I|when we|for instance)\b[^.!?]*", text, re.IGNORECASE)
+        example = _short_clause(match.group(0) if match else text, 20)
+        _add_fact(
+            facts,
+            counters,
+            fact_type="concrete_example",
+            source="transcript",
+            transcript_text=example,
+            observed_behavior=f"The answer gave a concrete support point: {example}.",
+            related_dimensions=("Persuasion", "Clarity"),
+            confidence=min(metric_conf + 0.05, 0.9),
+            timestamp_source="estimated",
+            supporting_metric_ids=("linguistic.specificity_score", "linguistic.concreteness_score"),
+            user_safe=True,
+        )
+
+    repeated = _repeated_phrase(text) if text_safe else None
+    if repeated and (metrics.linguistic.repetition_rate or 0) >= 0.35:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="repeated_phrase",
+            source="transcript",
+            transcript_text=repeated,
+            observed_behavior=f"The phrase {repeated} repeated instead of advancing the answer.",
+            related_dimensions=("Structure", "Clarity"),
+            confidence=min(metric_conf, 0.82),
+            supporting_metric_ids=("linguistic.repetition_rate",),
+            user_safe=True,
+        )
+
+    if (metrics.linguistic.structure_score is not None and metrics.linguistic.structure_score <= 0.45) or (metrics.linguistic.rambling_score or 0) >= 0.45:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="weak_local_structure",
+            source="transcript" if text_safe else "metrics",
+            transcript_text=_short_clause(text, 24) if text_safe else None,
+            observed_behavior="The answer path did not consistently separate point, support, and close.",
+            related_dimensions=("Structure", "Clarity"),
+            confidence=metric_conf,
+            supporting_metric_ids=("linguistic.structure_score", "linguistic.rambling_score"),
+            user_safe=text_safe,
+        )
+    elif metrics.linguistic.structure_score is not None and metrics.linguistic.structure_score >= 0.72:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="strong_local_structure",
+            source="transcript" if text_safe else "metrics",
+            transcript_text=_short_clause(opening or text, 22) if text_safe else None,
+            observed_behavior="The answer kept a visible local structure.",
+            related_dimensions=("Structure", "Clarity"),
+            confidence=min(metric_conf + 0.03, 0.9),
+            supporting_metric_ids=("linguistic.structure_score",),
+            user_safe=text_safe,
+        )
+
+    if text_safe and closing and ((metrics.linguistic.closing_strength_score or 1) <= 0.5 or re.search(r"\b(and|but|so|um|uh)$", closing.strip(), re.IGNORECASE)):
+        _add_fact(
+            facts,
+            counters,
+            fact_type="abrupt_ending",
+            source="transcript",
+            start_ms=closing_start,
+            end_ms=closing_end,
+            transcript_text=closing,
+            observed_behavior="The closing did not turn the final idea into a clean takeaway.",
+            related_dimensions=("Command", "Structure"),
+            confidence=metric_conf,
+            timestamp_source=closing_ts,
+            supporting_metric_ids=("linguistic.closing_strength_score",),
+            user_safe=True,
+        )
+    elif (metrics.linguistic.closing_strength_score or 0) >= 0.72:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="reinforced_ending",
+            source="transcript" if text_safe else "metrics",
+            start_ms=closing_start,
+            end_ms=closing_end,
+            transcript_text=closing if text_safe else None,
+            observed_behavior="The closing preserved the final impression instead of drifting away.",
+            related_dimensions=("Command", "Structure"),
+            confidence=min(metric_conf + 0.04, 0.9),
+            timestamp_source=closing_ts,
+            supporting_metric_ids=("linguistic.closing_strength_score",),
+            user_safe=text_safe,
+        )
+
+    if (metrics.linguistic.lexical_fillers or 0) > 0 or (metrics.linguistic.filler_words_per_min or 0) >= 6:
+        filler_words = []
+        if transcript and text_safe:
+            filler_words = [word.text for word in transcript.words if word.is_filler][:4]
+        summary = f"{len(filler_words)} visible filler word{'s' if len(filler_words) != 1 else ''}" if filler_words else _metric_summary("filler words per minute", metrics.linguistic.filler_words_per_min)
+        _add_fact(
+            facts,
+            counters,
+            fact_type="lexical_filler",
+            source="transcript" if text_safe else "metrics",
+            transcript_text=", ".join(filler_words) if filler_words else None,
+            observed_behavior="Lexical fillers appeared in the wording.",
+            measurement_summary=summary,
+            related_dimensions=("Clarity", "Composure"),
+            confidence=min(metric_conf + 0.02, 0.88),
+            supporting_metric_ids=("linguistic.lexical_fillers", "linguistic.filler_words_per_min"),
+            user_safe=bool(filler_words),
+        )
+
+    if (metrics.linguistic.acoustic_hesitations or 0) > 0 or (metrics.derived.hesitation_cluster_score or 0) >= 0.55:
+        count = metrics.linguistic.acoustic_hesitations or metrics.rhythm.hesitation_windows or 1
+        matching = next((moment for moment in moments if moment.type in {"hesitation_cluster", "confidence_drop", "most_unstable_section"}), None)
+        span = _transcript_window(transcript.words, matching.start_ms, matching.end_ms) if transcript and matching and text_safe else None
+        _add_fact(
+            facts,
+            counters,
+            fact_type="acoustic_hesitation",
+            source="acoustic",
+            start_ms=matching.start_ms if matching else None,
+            end_ms=matching.end_ms if matching else None,
+            transcript_text=span,
+            observed_behavior=f"{int(count)} hesitation event{'s' if int(count) != 1 else ''} appeared in the delivery timing.",
+            measurement_summary=f"{int(count)} hesitation event{'s' if int(count) != 1 else ''}",
+            related_dimensions=("Composure", "Command"),
+            confidence=min(metric_conf + 0.04, 0.88),
+            timestamp_source=matching.timestamp_source if matching else "estimated",
+            supporting_metric_ids=("linguistic.acoustic_hesitations", "derived.hesitation_cluster_score", "rhythm.hesitation_windows"),
+            user_safe=True,
+        )
+
+    if (metrics.rhythm.speed_up_segments or 0) > 0 or (metrics.rhythm.burst_speaking_segments or 0) > 0:
+        matching = next((moment for moment in moments if moment.type in {"rushing_moment", "confidence_drop", "most_unstable_section"}), None)
+        span = _transcript_window(transcript.words, matching.start_ms, matching.end_ms) if transcript and matching and text_safe else None
+        _add_fact(
+            facts,
+            counters,
+            fact_type="pace_acceleration",
+            source="acoustic",
+            start_ms=matching.start_ms if matching else None,
+            end_ms=matching.end_ms if matching else None,
+            transcript_text=span,
+            observed_behavior="Pace increased during part of the answer instead of staying even.",
+            measurement_summary=_metric_summary("speed-up sections", metrics.rhythm.speed_up_segments),
+            related_dimensions=("Composure", "Clarity", "Command"),
+            confidence=min(metric_conf + 0.03, 0.88),
+            timestamp_source=matching.timestamp_source if matching else "estimated",
+            supporting_metric_ids=("rhythm.speed_up_segments", "rhythm.burst_speaking_segments"),
+            user_safe=True,
+        )
+    elif (metrics.rhythm.rhythm_consistency or 0) >= 0.75 and 115 <= (metrics.raw_acoustic.words_per_minute or metrics.rhythm.words_per_minute or 0) <= 165:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="pace_stabilization",
+            source="acoustic",
+            observed_behavior="Pace stayed in a controlled range across the answer.",
+            measurement_summary="controlled pace range",
+            related_dimensions=("Composure", "Clarity"),
+            confidence=min(metric_conf + 0.03, 0.9),
+            supporting_metric_ids=("rhythm.rhythm_consistency", "raw_acoustic.words_per_minute"),
+            user_safe=True,
+        )
+
+    if (metrics.raw_acoustic.mid_phrase_pause_rate or 0) >= 0.35 or (metrics.vad.mid_sentence_pauses_ms and len(metrics.vad.mid_sentence_pauses_ms) >= 2):
+        _add_fact(
+            facts,
+            counters,
+            fact_type="pause_cluster",
+            source="acoustic",
+            observed_behavior="Pauses clustered inside the thought rather than only between complete phrases.",
+            measurement_summary="clustered mid-thought pauses",
+            related_dimensions=("Composure", "Clarity"),
+            confidence=metric_conf,
+            supporting_metric_ids=("raw_acoustic.mid_phrase_pause_rate", "vad.mid_sentence_pauses_ms"),
+            user_safe=True,
+        )
+    elif 250 <= (metrics.raw_acoustic.avg_pause_ms or 0) <= 800 and (metrics.raw_acoustic.mid_phrase_pause_rate or 1) <= 0.25:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="owned_pause",
+            source="acoustic",
+            observed_behavior="Pauses were more likely to land between thoughts than interrupt them.",
+            measurement_summary="owned phrase spacing",
+            related_dimensions=("Command", "Composure"),
+            confidence=min(metric_conf + 0.04, 0.9),
+            supporting_metric_ids=("raw_acoustic.avg_pause_ms", "raw_acoustic.mid_phrase_pause_rate"),
+            user_safe=True,
+        )
+
+    if (metrics.derived.dynamic_emphasis_score is not None and metrics.derived.dynamic_emphasis_score <= 0.3) or (metrics.derived.monotony_index or 0) >= 0.45:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="flat_emphasis",
+            source="acoustic",
+            observed_behavior="Important words did not receive much contrast from the surrounding phrase.",
+            measurement_summary="low vocal contrast",
+            related_dimensions=("Presence", "Persuasion"),
+            confidence=metric_conf,
+            supporting_metric_ids=("derived.dynamic_emphasis_score", "derived.monotony_index"),
+            user_safe=True,
+        )
+    elif (metrics.derived.dynamic_emphasis_score or 0) >= 0.62:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="strong_emphasis",
+            source="acoustic",
+            observed_behavior="Key moments received more vocal contrast than the surrounding delivery.",
+            measurement_summary="strong local emphasis",
+            related_dimensions=("Presence", "Persuasion"),
+            confidence=min(metric_conf + 0.03, 0.9),
+            supporting_metric_ids=("derived.dynamic_emphasis_score",),
+            user_safe=True,
+        )
+
+    if (metrics.raw_acoustic.terminal_rising_ratio or 0) >= 0.45:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="rising_ending",
+            source="acoustic",
+            start_ms=closing_start,
+            end_ms=closing_end,
+            transcript_text=closing if text_safe else None,
+            observed_behavior="Some declarative endings rose instead of landing with a clear finish.",
+            measurement_summary="rising declarative endings",
+            related_dimensions=("Command", "Composure"),
+            confidence=metric_conf,
+            timestamp_source=closing_ts,
+            supporting_metric_ids=("raw_acoustic.terminal_rising_ratio",),
+            user_safe=text_safe or not closing,
+        )
+    elif (metrics.raw_acoustic.terminal_falling_ratio or 0) >= 0.35 and (metrics.linguistic.closing_strength_score or 0) >= 0.65:
+        _add_fact(
+            facts,
+            counters,
+            fact_type="decisive_ending",
+            source="acoustic",
+            start_ms=closing_start,
+            end_ms=closing_end,
+            transcript_text=closing if text_safe else None,
+            observed_behavior="The final delivery pattern supported a clear full-stop ending.",
+            measurement_summary="falling ending pattern",
+            related_dimensions=("Command", "Structure"),
+            confidence=min(metric_conf + 0.03, 0.9),
+            timestamp_source=closing_ts,
+            supporting_metric_ids=("raw_acoustic.terminal_falling_ratio", "linguistic.closing_strength_score"),
+            user_safe=text_safe or not closing,
+        )
+
+    if not audio_quality.usable:
+        for index, fact in enumerate(facts):
+            if fact.source == "acoustic":
+                facts[index] = RecordingFact(**{**fact.__dict__, "confidence": round(min(fact.confidence, 0.55), 2)})
+    if duration_ms and duration_ms < 25000:
+        return [fact for fact in facts if fact.confidence >= 0.62 and fact.fact_type in {"clear_opening_claim", "reinforced_ending", "pace_stabilization", "owned_pause"}]
+    return facts
+
+
+def _facts_by_type(facts: list[RecordingFact], *types: str) -> list[RecordingFact]:
+    wanted = set(types)
+    return [fact for fact in facts if fact.fact_type in wanted]
+
+
+def _fact_map(facts: list[RecordingFact]) -> dict[str, RecordingFact]:
+    return {fact.fact_id: fact for fact in facts}
+
+
+def _observation_from_facts(
+    observation_id: str,
+    title: str,
+    pattern: str,
+    effect: str,
+    facts: list[RecordingFact],
+    dimensions: tuple[str, ...],
+    impact: float,
+    trainability: float,
+    target_behavior: str,
+    drill_categories: tuple[str, ...],
+    contradictions: list[RecordingFact] | None = None,
+) -> FactObservation:
+    contradictions = contradictions or []
+    confidences = [fact.confidence for fact in facts]
+    confidence = sum(confidences) / max(len(confidences), 1)
+    independence = min(1.0, len({fact.source for fact in facts}) * 0.22 + len({fact.fact_type for fact in facts}) * 0.18)
+    contradiction_penalty = min(0.35, sum(fact.confidence for fact in contradictions) * 0.12)
+    importance = _clamp01(impact * (0.55 + confidence * 0.35 + independence * 0.1) - contradiction_penalty)
+    distinctiveness = _clamp01(0.45 + len({fact.fact_type for fact in facts}) * 0.16 + len({fact.source for fact in facts}) * 0.08)
+    return FactObservation(
+        observation_id=observation_id,
+        title=title,
+        observed_pattern=_sentence(pattern),
+        supporting_fact_ids=tuple(fact.fact_id for fact in facts),
+        listener_effect=_sentence(effect),
+        related_dimensions=dimensions,
+        confidence=round(confidence, 2),
+        importance=round(importance, 3),
+        trainability=trainability,
+        distinctiveness=round(distinctiveness, 2),
+        contradiction_penalty=round(contradiction_penalty, 2),
+        target_behavior=target_behavior,
+        recommended_drill_categories=drill_categories,
+    )
+
+
+def _build_fact_observations(facts: list[RecordingFact]) -> list[FactObservation]:
+    observations: list[FactObservation] = []
+    clear = _facts_by_type(facts, "clear_opening_claim")
+    unsupported = _facts_by_type(facts, "claim_without_proof")
+    examples = _facts_by_type(facts, "concrete_example")
+    closing_weak = _facts_by_type(facts, "abrupt_ending")
+    if unsupported:
+        support = (clear[:1] + unsupported[:1] + closing_weak[:1]) or unsupported[:1]
+        claim_text = _fact_phrase(unsupported[0])
+        claim = f"the claim about {_lower_first(claim_text)}" if claim_text else "the main claim"
+        observations.append(
+            _observation_from_facts(
+                "thin_proof",
+                "Clear claim, thin proof",
+                f"The answer gave the listener a direction, but {claim} did not get a concrete example or proof point behind it.",
+                "The listener can understand the claim before they have enough evidence to believe it.",
+                support,
+                ("Persuasion", "Clarity", "Structure"),
+                0.94,
+                0.92,
+                "grounded_specificity",
+                ("specificity", "structure_compression"),
+                examples[:1],
+            )
+        )
+
+    hesitation = _facts_by_type(facts, "acoustic_hesitation", "pause_cluster", "lexical_filler", "pace_acceleration")
+    if hesitation:
+        acoustic = _facts_by_type(hesitation, "acoustic_hesitation")
+        lexical = _facts_by_type(hesitation, "lexical_filler")
+        pieces = []
+        if acoustic:
+            pieces.append(acoustic[0].measurement_summary or "hesitation events")
+        if lexical:
+            pieces.append(lexical[0].measurement_summary or "lexical fillers")
+        if _facts_by_type(hesitation, "pace_acceleration"):
+            pieces.append("a local pace increase")
+        summary = ", ".join(pieces) if pieces else "delivery interruptions"
+        pattern = (
+            f"{summary} appeared; you paused while searching for your next idea instead of restarting cleanly."
+            if acoustic and not lexical
+            else f"{summary} appeared while the answer was developing."
+        )
+        observations.append(
+            _observation_from_facts(
+                "hesitation_control",
+                "Delivery searched while the idea was moving",
+                pattern,
+                "The listener may hear the speaker finding the wording in real time instead of leading the thought cleanly.",
+                hesitation[:3],
+                ("Composure", "Command", "Clarity"),
+                0.9,
+                0.86,
+                "pause_ownership",
+                ("pause_ownership", "composure", "pace_regulation", "filler_reduction"),
+            )
+        )
+
+    unclear = _facts_by_type(facts, "delayed_main_point", "weak_local_structure", "repeated_phrase", "weak_transition", "topic_shift", "unclear_sentence_path")
+    if unclear:
+        observations.append(
+            _observation_from_facts(
+                "unclear_path",
+                "The answer path did not stay visible",
+                "The answer made the listener work to separate the main point, the support, and the close.",
+                "That can reduce trust in the speaker's control even when individual ideas are understandable.",
+                unclear[:3],
+                ("Structure", "Clarity", "Persuasion"),
+                0.86,
+                0.9,
+                "structured_thinking",
+                ("opening_strength", "structure_compression"),
+            )
+        )
+
+    weak_close = _facts_by_type(facts, "abrupt_ending", "rising_ending")
+    decisive = _facts_by_type(facts, "decisive_ending", "reinforced_ending")
+    if weak_close:
+        close_ref = _content_reference(weak_close[0])
+        observations.append(
+            _observation_from_facts(
+                "weak_close",
+                "The ending did not fully land",
+                f"Near the end, {close_ref} without turning into a clean final takeaway.",
+                "The final impression can feel less settled than the answer's earlier direction.",
+                weak_close[:2],
+                ("Command", "Structure"),
+                0.82,
+                0.88,
+                "clean_closing",
+                ("closing_strength", "declarative_finality"),
+                decisive[:1],
+            )
+        )
+
+    flat = _facts_by_type(facts, "flat_emphasis")
+    if flat:
+        observations.append(
+            _observation_from_facts(
+                "flat_presence",
+                "Important words did not get enough contrast",
+                flat[0].observed_behavior,
+                "The point may be clear but less memorable because the delivery does not mark what matters most.",
+                flat[:1],
+                ("Presence", "Persuasion"),
+                0.72,
+                0.74,
+                "vocal_variety",
+                ("dynamic_emphasis", "presence"),
+            )
+        )
+
+    strengths = _facts_by_type(facts, "strong_local_structure", "pace_stabilization", "owned_pause", "strong_emphasis", "clear_opening_claim", "reinforced_ending", "decisive_ending")
+    if strengths:
+        chosen = strengths[:3]
+        observations.append(
+            _observation_from_facts(
+                "usable_strength",
+                "There is a repeatable strength to build from",
+                "The recording includes a controlled behaviour that should be preserved while the main limiter is trained.",
+                "The fix should keep that strength intact instead of treating the whole answer as broken.",
+                chosen,
+                tuple(dict.fromkeys(dimension for fact in chosen for dimension in fact.related_dimensions)) or ("Clarity",),
+                0.42,
+                0.55,
+                "preserve_strength",
+                (),
+            )
+        )
+
+    merged: dict[str, FactObservation] = {}
+    for observation in observations:
+        existing = merged.get(observation.observation_id)
+        if not existing or observation.importance > existing.importance:
+            merged[observation.observation_id] = observation
+    return sorted(merged.values(), key=lambda item: (item.importance, item.confidence, item.distinctiveness), reverse=True)
+
+
+def _select_fact_diagnosis(
+    observations: list[FactObservation],
+    facts: list[RecordingFact],
+    coaching: CoachingEngine | None,
+    confidence: float,
+    audio_quality: AudioQuality,
+) -> FactDiagnosis | None:
+    negative = [item for item in observations if item.observation_id != "usable_strength"]
+    if not negative:
+        return None
+    selected = max(
+        negative,
+        key=lambda item: (
+            item.importance * 0.38
+            + item.confidence * 0.22
+            + min(1.0, len(item.supporting_fact_ids) / 3) * 0.14
+            + item.trainability * 0.16
+            + item.distinctiveness * 0.1
+            - item.contradiction_penalty
+        ),
+    )
+    fact_lookup = _fact_map(facts)
+    supporting = [fact_lookup[fact_id] for fact_id in selected.supporting_fact_ids if fact_id in fact_lookup]
+    fact_ids = tuple(fact.fact_id for fact in supporting)
+    support_sources = len({fact.source for fact in supporting})
+    quality = 0.82 if audio_quality.usable else 0.58
+    diagnosis_confidence = _clamp01(min(confidence or selected.confidence, selected.confidence) * 0.64 + quality * 0.16 + min(1.0, support_sources / 2) * 0.12 + min(1.0, len(fact_ids) / 3) * 0.08 - selected.contradiction_penalty)
+    uncertainty_note = None
+    if selected.contradiction_penalty:
+        uncertainty_note = "A competing signal reduces certainty, so the report focuses only on the strongest supported pattern."
+    drill_id = _valid_drill_for_target(selected.target_behavior, selected.recommended_drill_categories, coaching)
+    title_map = {
+        "thin_proof": "Clear Direction, Thin Proof",
+        "hesitation_control": "Interrupted Control",
+        "unclear_path": "Unclear Answer Path",
+        "weak_close": "Unfinished Landing",
+        "flat_presence": "Low-Contrast Delivery",
+    }
+    mechanism_map = {
+        "thin_proof": "A clear claim arrived, but the answer did not attach a concrete situation, number, or example to make the claim feel proven.",
+        "hesitation_control": "The answer developed while timing interruptions were audible, so the delivery exposed the search process.",
+        "unclear_path": "The answer asked the listener to infer the structure instead of hearing a clean point, support, and close.",
+        "weak_close": "The recording gave away finality near the end, so the answer stopped before it fully landed.",
+        "flat_presence": "The important words were not separated enough from the surrounding delivery, so the message had less pull.",
+    }
+    return FactDiagnosis(
+        diagnosis_id=selected.observation_id,
+        title=title_map.get(selected.observation_id, selected.title),
+        one_sentence_pattern=selected.observed_pattern,
+        mechanism=mechanism_map.get(selected.observation_id, selected.observed_pattern),
+        listener_consequence=selected.listener_effect,
+        primary_observation_ids=(selected.observation_id,),
+        secondary_observation_ids=tuple(item.observation_id for item in observations if item.observation_id != selected.observation_id)[:2],
+        related_dimensions=selected.related_dimensions,
+        confidence=round(diagnosis_confidence, 2),
+        uncertainty_note=uncertainty_note,
+        target_behavior=selected.target_behavior,
+        recommended_drill_id=drill_id,
+        fact_ids=fact_ids,
+    )
+
+
+def _valid_drill_for_target(target_behavior: str, categories: tuple[str, ...], coaching: CoachingEngine | None) -> str | None:
+    if not coaching:
+        return None
+    library = {drill.drill_id: drill for drill in coaching.drill_library}
+    ordered_ids = []
+    for candidate in (coaching.selected_interventions.primary_drill, coaching.selected_interventions.secondary_drill):
+        if candidate:
+            ordered_ids.append(candidate.drill_id)
+    ordered_ids.extend(candidate.drill_id for candidate in coaching.future_training_queue)
+    ordered_ids.extend(drill.drill_id for drill in coaching.drill_library)
+    for drill_id in dict.fromkeys(ordered_ids):
+        drill = library.get(drill_id)
+        if not drill:
+            continue
+        if target_behavior in drill.target_behaviours or drill.category in categories:
+            return drill.drill_id
+    return None
+
+
+def _drill_definition(drill_id: str | None, coaching: CoachingEngine | None):
+    if not drill_id or not coaching:
+        return None
+    return next((item for item in coaching.drill_library if item.drill_id == drill_id), None)
+
+
+def _evidence_card_from_fact_observation(
+    observation: FactObservation,
+    facts: dict[str, RecordingFact],
+    *,
+    diagnosis: FactDiagnosis | None,
+) -> ReportEvidenceCard:
+    source_facts = [facts[fact_id] for fact_id in observation.supporting_fact_ids if fact_id in facts]
+    first = source_facts[0] if source_facts else None
+    timestamp = [first.start_ms, first.end_ms] if first and _timestamps_safe(first.start_ms, first.end_ms, first.timestamp_source) else None
+    start_ms = timestamp[0] if timestamp else None
+    end_ms = timestamp[1] if timestamp else None
+    link = "This is the clearest proof of the diagnosis." if diagnosis and observation.observation_id in diagnosis.primary_observation_ids else "This shows an important supporting behaviour in the recording."
+    what_happened = observation.observed_pattern
+    why = f"{observation.listener_effect} {link}"
+    return ReportEvidenceCard(
+        evidence_id=f"fact_ev_{observation.observation_id}",
+        id=observation.observation_id,
+        trait=observation.related_dimensions[0] if observation.related_dimensions else None,
+        dimension=observation.related_dimensions[0] if observation.related_dimensions else None,
+        direction="positive" if observation.observation_id == "usable_strength" else "negative",
+        signal=observation.title,
+        what_happened=what_happened,
+        why_it_matters=why,
+        listener_interpretation=observation.listener_effect,
+        related_dimension=observation.related_dimensions[0] if observation.related_dimensions else "Authority",
+        confidence=observation.confidence,
+        source_metrics=[],
+        recording_fact_ids=list(observation.supporting_fact_ids),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        timestamp=timestamp,
+    )
+
+
+def _fact_evidence_cards(observations: list[FactObservation], facts: list[RecordingFact], diagnosis: FactDiagnosis | None) -> list[ReportEvidenceCard]:
+    fact_lookup = _fact_map(facts)
+    primary_ids = set(diagnosis.primary_observation_ids if diagnosis else ())
+    ordered = sorted(
+        observations,
+        key=lambda item: (
+            item.observation_id in primary_ids,
+            item.importance,
+            item.confidence,
+            item.distinctiveness,
+        ),
+        reverse=True,
+    )
+    cards: list[ReportEvidenceCard] = []
+    seen_text: set[str] = set()
+    for observation in ordered:
+        if len(cards) >= 3:
+            break
+        card = _evidence_card_from_fact_observation(observation, fact_lookup, diagnosis=diagnosis)
+        normalized = _normalize_copy(" ".join([card.signal, card.what_happened, card.listener_interpretation]))
+        if normalized in seen_text:
+            continue
+        seen_text.add(normalized)
+        cards.append(card)
+    return cards
+
+
+def _normalize_copy(text: str | None) -> str:
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    tokens = [
+        token
+        for token in cleaned.split()
+        if token not in {"the", "a", "an", "and", "or", "to", "of", "in", "for", "with", "that", "this", "it", "is", "are", "was", "were"}
+    ]
+    return " ".join(tokens)
+
+
+def _copy_similarity(a: str | None, b: str | None) -> float:
+    a_tokens = set(_normalize_copy(a).split())
+    b_tokens = set(_normalize_copy(b).split())
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
+
+
+def _fact_evidence_ids(cards: list[ReportEvidenceCard]) -> list[str]:
+    return [card.evidence_id for card in cards[:3]]
+
+
+def _fact_mirror(scores: Scores, authority_type: ReportAuthorityType, diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard], confidence_label: str) -> ReportMirror:
+    evidence_ids = _fact_evidence_ids(cards)
+    strength = next((card for card in cards if card.direction == "positive"), None)
+    if diagnosis:
+        strength_phrase = strength.what_happened if strength else "the recording gives you at least one stable behaviour to build from"
+        headline = f"{diagnosis.title}: {diagnosis.one_sentence_pattern}"
+        identity = f"{_sentence(strength_phrase)} The part holding the answer back is narrower: {diagnosis.listener_consequence}"
+        tension = f"{diagnosis.related_dimensions[0] if diagnosis.related_dimensions else 'Authority'} improves when {diagnosis.target_behavior.replace('_', ' ')} becomes visible in the answer"
+    else:
+        headline = "This recording shows a mostly controlled authority signal."
+        identity = "The report found more repeatable strengths than limiting behaviours in this sample."
+        tension = "The next improvement is to preserve the strongest behaviour under a harder prompt."
+    return ReportMirror(
+        headline=_clean_report_text(headline),
+        identity_read=_clean_report_text(identity),
+        one_line_identity_read=_clean_report_text(identity),
+        core_tension=_clean_report_text(tension),
+        emotional_tone=_emotional_tone(scores),
+        authority_type=authority_type.label,
+        confidence_label=confidence_label,  # type: ignore[arg-type]
+        confidence_level=confidence_label,  # type: ignore[arg-type]
+        evidence_ids=evidence_ids,
+    )
+
+
+def _fact_report_diagnosis(scores: Scores, diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard]) -> ReportDiagnosis:
+    dims = _ordered_dimensions(scores)
+    strongest = DIMENSION_LABELS[dims[0][0]]
+    limiter = diagnosis.related_dimensions[0] if diagnosis and diagnosis.related_dimensions else DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
+    evidence_ids = _fact_evidence_ids(cards)
+    if diagnosis:
+        core = diagnosis.mechanism
+        consequence = diagnosis.listener_consequence
+    else:
+        core = "No single limiter was strong enough to become the report's main diagnosis."
+        consequence = "Treat this as a baseline and retest with a harder prompt to expose the next trainable edge."
+    return ReportDiagnosis(
+        strongest_dimension=strongest,
+        limiting_dimension=limiter,
+        primary_strength_dimension=strongest,
+        primary_limiting_dimension=limiter,
+        core_behavioural_pattern=_clean_report_text(core),
+        core_pattern=_clean_report_text(core),
+        social_consequence=_clean_report_text(consequence),
+        supporting_evidence_ids=evidence_ids,
+        evidence_ids=evidence_ids,
+        severity=_severity(_dimension_scores(scores).get(limiter.lower(), 60) if limiter else 60),  # type: ignore[arg-type]
+    )
+
+
+def _fact_perception_map(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard], confidence: float, scenario: str) -> ReportPerceptionMap:
+    evidence_ids = _fact_evidence_ids(cards)
+    if not diagnosis:
+        reads = {
+            "first_impression": _read("Controlled baseline", "The first impression is that this recording gives the listener enough control to follow the speaker.", evidence_ids, confidence)
+        }
+        if scenario == "interview":
+            reads["interview_read"] = _read("Interview baseline", "In an interview, this would read as a usable baseline, with the next pass needing one sharper answer target.", evidence_ids, confidence)
+        return ReportPerceptionMap(**reads)
+    reads: dict[str, ReportPerceptionRead] = {
+        "first_impression": _read("Specific first read", f"The opening read is shaped by this behaviour: {diagnosis.one_sentence_pattern}", evidence_ids, confidence),
+    }
+    if diagnosis.diagnosis_id == "thin_proof":
+        reads["professional_read"] = _read("Credible, but under-proven", "In a professional setting, the claim would be easy to understand but would need one example before it felt decision-ready.", evidence_ids, confidence)
+        reads["interview_read"] = _read("Answer needs proof", "In an interview, the answer would sound more convincing if the main benefit were followed by a specific situation showing it.", evidence_ids, confidence)
+        reads["persuasion_read"] = _read("Belief needs a handle", "For persuasion, the missing piece is not more explanation; it is one proof point the listener can picture.", evidence_ids, confidence)
+    elif diagnosis.diagnosis_id == "hesitation_control":
+        reads["emotional_read"] = _read("Pressure becomes audible", "Emotionally, the recording can sound like the speaker is managing the thought while speaking instead of arriving with it already held.", evidence_ids, confidence)
+        reads["professional_read"] = _read("Control fluctuates", "Professionally, the content may still be useful, but timing interruptions make parts of the delivery feel less settled.", evidence_ids, confidence)
+        reads["leadership_read"] = _read("Needs calmer ownership", "For leadership, the same words would land stronger if silence replaced the search moments before key claims.", evidence_ids, confidence)
+    elif diagnosis.diagnosis_id == "unclear_path":
+        reads["professional_read"] = _read("More effort to follow", "In a work setting, listeners would need to assemble the answer path themselves instead of being led through it.", evidence_ids, confidence)
+        reads["leadership_read"] = _read("Control of the path matters", "For leadership, the issue is path control: the speaker needs to make the next step obvious before adding more detail.", evidence_ids, confidence)
+    elif diagnosis.diagnosis_id == "weak_close":
+        reads["interview_read"] = _read("Close the answer harder", "In an interview, the answer would be remembered better if the last sentence became a takeaway instead of an exit.", evidence_ids, confidence)
+        reads["leadership_read"] = _read("Finality carries command", "For leadership, the final line needs to sound like a decision, not simply the point running out of road.", evidence_ids, confidence)
+    elif diagnosis.diagnosis_id == "flat_presence":
+        reads["emotional_read"] = _read("Controlled but low contrast", "Emotionally, the speaker sounds controlled, but the delivery does not clearly mark what the listener should feel as important.", evidence_ids, confidence)
+        reads["persuasion_read"] = _read("Attention needs contrast", "For persuasion, the same idea would pull harder if key words carried more vocal contrast.", evidence_ids, confidence)
+
+    if scenario == "interview" and "interview_read" not in reads:
+        reads["interview_read"] = _read("Interview focus", "In an interview, the listener would mainly notice whether the answer gives a clear point before support.", evidence_ids, confidence)
+    ordered = list(reads.items())[:3]
+    return ReportPerceptionMap(**{key: value for key, value in ordered})
+
+
+def _fact_timeline(moments: list[Moment], cards: list[ReportEvidenceCard], duration_ms: int, scenario: str) -> list[ReportTimelineItem]:
+    if duration_ms and duration_ms < 25000:
+        return []
+    if scenario == "benchmark":
+        moments = [moment for moment in moments if moment.type != "most_improved_section"]
+    evidence_ids = _fact_evidence_ids(cards)
+    if not evidence_ids:
+        return []
+    label_map = {
+        "rushing_moment": ("Pace increased", "Pace became faster in this local stretch."),
+        "hesitation_cluster": ("Hesitation increased", "Hesitation events became more concentrated here."),
+        "filler_cluster": ("Lexical fillers clustered", "Filler words appeared close together in this stretch."),
+        "confidence_drop": ("Composure dropped", "The delivery became less settled than the surrounding section."),
+        "confidence_recovery": ("Composure recovered", "The delivery became more settled after the previous stretch."),
+        "weak_closing": ("Closing lost finality", "The ending carried less finality than the answer needed."),
+        "strong_closing": ("Close became decisive", "The final stretch supported a cleaner landing."),
+        "strong_opening": ("Opening set direction", "The opening made the answer path visible early."),
+        "weak_opening": ("Opening delayed the point", "The answer took longer to give the listener a clear direction."),
+        "monotone_stretch": ("Emphasis flattened", "Pitch and energy contrast became lower here."),
+        "pause_ownership_moment": ("Pause sounded owned", "The silence landed between thoughts rather than interrupting one."),
+        "high_presence_moment": ("Emphasis increased", "Energy and emphasis made this stretch easier to notice."),
+        "most_commanding_moment": ("Command strengthened", "Command cues were locally stronger here."),
+        "most_composed_moment": ("Pace and timing settled", "Composure cues were locally stronger here."),
+        "most_persuasive_moment": ("Persuasive contrast increased", "Presence and command aligned more strongly here."),
+        "strongest_moment": ("Structure and delivery aligned", "This stretch showed the strongest local combination of control and clarity."),
+        "most_costly_sentence": ("Local cost increased", "This span carried the clearest local cost to clarity or composure."),
+    }
+    items: list[ReportTimelineItem] = []
+    for moment in sorted(moments, key=lambda item: (item.importance_score, item.confidence), reverse=True):
+        if len(items) >= 3:
+            break
+        if moment.type not in label_map:
+            continue
+        if moment.end_ms <= moment.start_ms or moment.confidence < 0.45:
+            continue
+        if moment.timestamp_source not in {"real", "segment"}:
+            continue
+        headline, summary = label_map[moment.type]
+        linked = [evidence_id for evidence_id in evidence_ids if evidence_id in set(moment.supporting_evidence_ids)] or evidence_ids[:1]
+        items.append(
+            ReportTimelineItem(
+                moment_id=moment.moment_id,
+                type=moment.type,
+                priority=moment.priority,
+                headline=headline,
+                summary=summary,
+                listener_interpretation=moment.listener_interpretation or "Listeners hear this as a local shift in the answer.",
+                why_it_matters=moment.why_it_matters or "Local shifts matter because they show where the recording changes.",
+                dimension_impact=moment.dimension_impact,
+                confidence=moment.confidence,
+                start_ms=moment.start_ms,
+                end_ms=moment.end_ms,
+                timestamp_source=moment.timestamp_source,
+                evidence_ids=linked,
+                supporting_metrics=[_plain_metric_label(metric) for metric in moment.supporting_metrics],
+                transcript_span=moment.transcript_span if moment.timestamp_source in {"real", "segment"} else None,
+                word_ids=moment.word_ids if moment.timestamp_source in {"real", "segment"} else [],
+                scenario_relevance=moment.scenario_relevance,
+                coaching_relevance=moment.coaching_relevance,
+                importance_score=moment.importance_score,
+                moment_group=_moment_group(moment.type),
+                severity=moment.severity,
+                preview_visible_free=moment.preview_visible_free,
+            )
+        )
+    return items
+
+
+def _fact_dimension_reports(scores: Scores, facts: list[RecordingFact], cards: list[ReportEvidenceCard], confidence: float) -> dict[str, ReportDimensionReport]:
+    dims = _dimension_scores(scores)
+    card_by_fact = {
+        fact_id: card.evidence_id
+        for card in cards
+        for fact_id in card.recording_fact_ids
+    }
+    reports: dict[str, ReportDimensionReport] = {}
+    for dimension, score in dims.items():
+        label = DIMENSION_LABELS[dimension]
+        related = [fact for fact in facts if label in fact.related_dimensions]
+        positive = [fact for fact in related if fact.fact_type in {"clear_opening_claim", "concrete_example", "reinforced_ending", "decisive_ending", "pace_stabilization", "owned_pause", "strong_emphasis", "strong_local_structure"}]
+        limiting = [fact for fact in related if fact.fact_type not in {fact.fact_type for fact in positive}]
+        why: list[str] = []
+        if positive:
+            why.append(f"Strongest supporting fact: {positive[0].observed_behavior}")
+        if limiting:
+            why.append(f"Strongest limiting fact: {limiting[0].observed_behavior}")
+        if not why:
+            why.append("There is limited dimension-specific evidence in this recording, so this score should be read as a broad baseline.")
+        linked = list(dict.fromkeys(card_by_fact[fact.fact_id] for fact in related if fact.fact_id in card_by_fact))
+        if not linked:
+            linked = _fact_evidence_ids(cards)[:1]
+        reports[dimension] = ReportDimensionReport(
+            dimension=dimension,
+            score=score,
+            label=label,
+            meaning=DIMENSION_MEANING[dimension],
+            why=[_clean_report_text(item) for item in why[:2]],
+            listener_consequence=DIMENSION_CONSEQUENCE[dimension],
+            one_improvement_cue=_dimension_improvement_cue(dimension, limiting[:1]),
+            linked_evidence=linked,
+            confidence=round(confidence, 2),
+        )
+    return reports
+
+
+def _dimension_improvement_cue(dimension: str, limiting: list[RecordingFact]) -> str:
+    if limiting:
+        fact = limiting[0]
+        if fact.fact_type == "claim_without_proof":
+            return "Attach one specific example to the main claim."
+        if fact.fact_type in {"acoustic_hesitation", "pause_cluster", "lexical_filler"}:
+            return "Pause, then restart on a complete clause."
+        if fact.fact_type in {"abrupt_ending", "rising_ending"}:
+            return "Make the final sentence a takeaway and stop cleanly."
+        if fact.fact_type == "flat_emphasis":
+            return "Give the most important word a controlled contrast."
+    return DIMENSION_CUE[dimension]
+
+
+def _fact_hidden_cost(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard], confidence: float) -> ReportHiddenCost:
+    evidence_ids = _fact_evidence_ids(cards)
+    if not diagnosis:
+        consequence = "The downstream risk is plateau: without a sharper target, the next recording may repeat the same baseline instead of testing a specific behaviour."
+        dimension = "Authority"
+        cost_id = "baseline_plateau"
+    elif diagnosis.diagnosis_id == "thin_proof":
+        consequence = "The downstream cost is credibility leakage: people may accept the topic but hesitate to act because the claim has not been made concrete."
+        dimension = "Persuasion"
+        cost_id = "credibility_leakage"
+    elif diagnosis.diagnosis_id == "hesitation_control":
+        consequence = "The downstream cost is pressure leakage: the listener hears the work of finding the answer as much as the answer itself."
+        dimension = "Composure"
+        cost_id = "pressure_leakage"
+    elif diagnosis.diagnosis_id == "unclear_path":
+        consequence = "The downstream cost is effort: the listener spends attention reconstructing the path instead of weighing the point."
+        dimension = "Structure"
+        cost_id = "listener_effort"
+    elif diagnosis.diagnosis_id == "weak_close":
+        consequence = "The downstream cost is recency: the last impression carries less certainty than the earlier answer created."
+        dimension = "Command"
+        cost_id = "recency_loss"
+    else:
+        consequence = "The downstream cost is memorability: the listener can follow the words without feeling which idea should stay with them."
+        dimension = "Presence"
+        cost_id = "memorability_loss"
+    return ReportHiddenCost(dimension=dimension, cost_id=cost_id, consequence=consequence, evidence_ids=evidence_ids, confidence=confidence)
+
+
+def _fact_highest_fix(diagnosis: FactDiagnosis | None, coaching: CoachingEngine | None, cards: list[ReportEvidenceCard]) -> ReportHighestLeverageFix:
+    evidence_ids = _fact_evidence_ids(cards)
+    fallback_drill_id = coaching.selected_interventions.primary_drill.drill_id if coaching and coaching.selected_interventions.primary_drill else None
+    if not diagnosis and not fallback_drill_id and coaching and coaching.drill_library:
+        fallback_drill_id = next((drill.drill_id for drill in coaching.drill_library if drill.drill_id == "answer_first_v1"), coaching.drill_library[0].drill_id)
+    if not diagnosis and not fallback_drill_id:
+        fallback_drill_id = "answer_first_v1"
+    drill = _drill_definition(diagnosis.recommended_drill_id if diagnosis else fallback_drill_id, coaching)
+    if diagnosis and diagnosis.diagnosis_id == "thin_proof":
+        issue = "Add proof to the main claim"
+        plain = "Stop moving from claim to explanation without a proof point; instead, make one claim and immediately attach one concrete example."
+        why = "That change gives the listener something specific to believe, not just a reason to understand."
+        action = "Say the claim in one sentence, then begin the next sentence with a concrete situation, number, or named example."
+        success = "The next recording should make the main claim easier to picture."
+    elif diagnosis and diagnosis.diagnosis_id == "hesitation_control":
+        issue = "Own the pause before the thought"
+        plain = "Stop filling the search moment with sound; instead, pause before the next claim and restart on a complete sentence."
+        why = "That change hides the search process and lets the listener hear control before content resumes."
+        action = "When you feel a repair coming, hold silence for half a beat, then restart the sentence cleanly."
+        success = "The next recording should contain fewer audible search moments before important claims."
+    elif diagnosis and diagnosis.diagnosis_id == "unclear_path":
+        issue = "Put the answer path first"
+        plain = "Stop adding support before the listener knows the route; instead, open with the answer, then give one proof, then close."
+        why = "That change makes the listener feel led through the answer rather than asked to assemble it."
+        action = "Use three sentences only: answer, proof, close."
+        success = "The next recording should make the point, support, and close easy to separate."
+    elif diagnosis and diagnosis.diagnosis_id == "weak_close":
+        issue = "Turn the final line into a takeaway"
+        plain = "Stop letting the ending trail out; instead, make the last sentence a complete takeaway and leave silence after it."
+        why = "That change protects the final impression and makes the answer sound more decided."
+        action = "Write one closing sentence before recording, say it, then stop."
+        success = "The next recording should end with a sentence that sounds finished."
+    elif diagnosis and diagnosis.diagnosis_id == "flat_presence":
+        issue = "Mark the important word"
+        plain = "Stop giving every word the same weight; instead, choose one word in the key sentence and give it controlled contrast."
+        why = "That change tells the listener which idea deserves attention."
+        action = "Repeat the key sentence three times, moving the emphasis to the one word that carries the point."
+        success = "The next recording should make the key idea easier to remember."
+    else:
+        issue = "Retest with one sharper target"
+        plain = "Keep the strongest behaviour and use the next recording to test one harder prompt."
+        why = "That change turns a broad baseline into a trainable comparison."
+        action = "Record the same prompt again and deliberately exaggerate one improvement target."
+        success = "The next recording should reveal a clearer limiter or a measurable improvement."
+    return ReportHighestLeverageFix(
+        issue=issue,
+        plain_english=plain,
+        why_this_matters=why,
+        expected_score_lift="medium" if diagnosis else "low",
+        target_dimensions=drill.target_dimensions if drill else list(diagnosis.related_dimensions if diagnosis else ["Structure"]),
+        first_drill_id=drill.drill_id if drill else fallback_drill_id,
+        action_step=action,
+        success_signal=success,
+        duration_min=drill.estimated_duration_min if drill else 4,
+        selection_score=round(diagnosis.confidence if diagnosis else 0.3, 3),
+        evidence_ids=evidence_ids,
+    )
+
+
+def _instructions_for_drill(drill, diagnosis: FactDiagnosis | None) -> list[str]:
+    if not drill:
+        return ["Record the same prompt again for 45 to 60 seconds with one deliberate improvement target."]
+    category = drill.category
+    if category == "specificity":
+        return [
+            "Write one claim from the recording.",
+            "Add one concrete proof point: a situation, number, named example, or visible result.",
+            "Say only two sentences: claim, then proof.",
+            "Repeat 6 reps, changing the proof point each time.",
+        ]
+    if category in {"pause_ownership", "composure", "pace_regulation", "filler_reduction"}:
+        return [
+            "Choose one sentence from the recording.",
+            "Say the first half, pause silently for one beat, then finish the sentence.",
+            "If a filler starts, stop, hold silence, and restart the clause.",
+            "Complete 8 clean reps.",
+        ]
+    if category in {"opening_strength", "structure_compression"}:
+        return [
+            "Answer the prompt in exactly three sentences.",
+            "Sentence 1 gives the answer.",
+            "Sentence 2 gives one proof point.",
+            "Sentence 3 closes with the takeaway. Complete 5 reps.",
+        ]
+    if category in {"closing_strength", "declarative_finality"}:
+        return [
+            "Write one final takeaway sentence.",
+            "Say it with a slight downward finish.",
+            "Hold silence for half a second after the last word.",
+            "Repeat 8 reps without adding an extra sentence.",
+        ]
+    if category in {"dynamic_emphasis", "presence"}:
+        return [
+            "Pick the key sentence from the recording.",
+            "Choose the single word that carries the point.",
+            "Repeat the sentence 6 times, giving that word more contrast without speeding up.",
+            "Record the final 2 reps and keep the one where the point is easiest to remember.",
+        ]
+    target = diagnosis.target_behavior.replace("_", " ") if diagnosis else "the target behaviour"
+    return [
+        f"Practise {target} for {drill.estimated_duration_min} minutes.",
+        "Use short reps, not a full speech.",
+        "Keep the best take and compare it with the original recording.",
+    ]
+
+
+def _fact_training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard]) -> ReportTrainingPrescription:
+    drill = _drill_definition(fix.first_drill_id, coaching)
+    title = drill.title if drill else ("Answer First" if fix.first_drill_id == "answer_first_v1" else "Focused Retest")
+    why = (
+        f"Chosen because it trains {diagnosis.target_behavior.replace('_', ' ')}, which is the behaviour behind the main diagnosis."
+        if diagnosis
+        else "Chosen because the current recording is better used as a baseline than as a full diagnosis."
+    )
+    return ReportTrainingPrescription(
+        drill_id=drill.drill_id if drill else fix.first_drill_id,
+        title=title,
+        why_chosen=why,
+        instructions=_instructions_for_drill(drill, diagnosis),
+        target_metrics=[],
+        target_dimensions=drill.target_dimensions if drill else fix.target_dimensions,
+        action_step=fix.action_step,
+        expected_score_lift=fix.expected_score_lift,
+        duration_min=drill.estimated_duration_min if drill else fix.duration_min,
+        success_signal=f"{fix.success_signal} Retest on the same prompt immediately after the reps.",
+        evidence_ids=_fact_evidence_ids(cards),
+    )
+
+
+def _fact_retest(fix: ReportHighestLeverageFix) -> ReportRetestPlan:
+    focus = fix.issue or "same prompt retest"
+    compare = fix.target_dimensions or ["authority"]
+    return ReportRetestPlan(
+        recommended_retest_after_days=3,
+        focus_metric=focus,
+        compare_metrics=compare,
+        same_prompt_recommended=True,
+        success_definition=fix.success_signal or "The target behaviour should be easier to hear.",
+        evidence_ids=fix.evidence_ids,
+    )
+
+
+def _fact_primary_diagnostic(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard]) -> DiagnosticDiagnosis | None:
+    if not diagnosis:
+        return None
+    return DiagnosticDiagnosis(
+        diagnosis_id=diagnosis.diagnosis_id,
+        diagnosis_name=diagnosis.mechanism,
+        confidence=diagnosis.confidence,
+        severity="high" if diagnosis.confidence >= 0.82 else "medium" if diagnosis.confidence >= 0.58 else "low",
+        supporting_traits=[diagnosis.target_behavior],
+        contradicting_traits=[],
+        supporting_evidence_ids=_fact_evidence_ids(cards),
+        supporting_moment_ids=[],
+        affected_dimensions=list(diagnosis.related_dimensions),
+    )
+
+
+def _apply_report_repetition_guard(report: AuthorityReport) -> AuthorityReport:
+    if report.perception_map:
+        kept: dict[str, ReportPerceptionRead | None] = {}
+        prior: list[str] = []
+        for key, value in report.perception_map.model_dump().items():
+            if not value or not value.get("text"):
+                kept[key] = None
+                continue
+            text = value["text"]
+            if any(_copy_similarity(text, existing) >= 0.72 for existing in prior):
+                kept[key] = None
+                continue
+            prior.append(text)
+            kept[key] = ReportPerceptionRead(**value)
+        report = report.model_copy(update={"perception_map": ReportPerceptionMap(**kept)})
+    cards = []
+    seen: set[str] = set()
+    for card in report.evidence_chain:
+        merged = _normalize_copy(" ".join([card.signal, card.what_happened, card.why_it_matters]))
+        if merged in seen:
+            continue
+        seen.add(merged)
+        cards.append(card)
+    return report.model_copy(update={"evidence_chain": cards[:3], "timeline": report.timeline[:3]})
+
+
+def _fact_led_report(
+    *,
+    scores: Scores,
+    metrics: Metrics,
+    psychological_inference: PsychologicalInference,
+    diagnostic_reasoning: DiagnosticReasoning,
+    coaching_engine: CoachingEngine | None,
+    evidence: list[EvidenceItem],
+    moments: list[Moment],
+    uncertainty: Uncertainty,
+    audio_quality: AudioQuality,
+    duration_ms: int,
+    scenario: str,
+    moment_intelligence: MomentIntelligence | None,
+    transcript: Transcript | None,
+) -> AuthorityReport:
+    del evidence
+    confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
+    if _is_insufficient_sample(metrics, audio_quality, duration_ms, confidence):
+        return _insufficient_report(
+            scores=scores,
+            metrics=metrics,
+            audio_quality=audio_quality,
+            duration_ms=duration_ms,
+            scenario=scenario,
+            uncertainty=uncertainty,
+            psychological_inference=psychological_inference,
+            diagnostic_reasoning=diagnostic_reasoning,
+            coaching_engine=coaching_engine,
+            moment_intelligence=moment_intelligence,
+        )
+    facts = _build_recording_fact_ledger(
+        transcript=transcript,
+        metrics=metrics,
+        psychological_inference=psychological_inference,
+        moments=moments,
+        audio_quality=audio_quality,
+        duration_ms=duration_ms,
+        base_confidence=confidence,
+    )
+    observations = _build_fact_observations(facts)
+    diagnosis_model = _select_fact_diagnosis(observations, facts, coaching_engine, confidence, audio_quality)
+    cards = _fact_evidence_cards(observations, facts, diagnosis_model)
+    if not cards:
+        cards = [_insufficient_evidence_card(confidence, audio_quality)]
+    evidence_ids = _fact_evidence_ids(cards)
+    authority_type = _authority_type(scores, evidence_ids, confidence)
+    diagnosis_confidence = diagnosis_model.confidence if diagnosis_model else min(confidence, 0.58)
+    confidence_label = _confidence_label(diagnosis_confidence)
+    mirror = _fact_mirror(scores, authority_type, diagnosis_model, cards, confidence_label)
+    diagnosis = _fact_report_diagnosis(scores, diagnosis_model, cards)
+    perception = _fact_perception_map(diagnosis_model, cards, diagnosis_confidence, scenario)
+    timeline = _fact_timeline(moments, cards, duration_ms, scenario)
+    dimension_reports = _fact_dimension_reports(scores, facts, cards, confidence)
+    hidden_cost = _fact_hidden_cost(diagnosis_model, cards, diagnosis_confidence)
+    fix = _fact_highest_fix(diagnosis_model, coaching_engine, cards)
+    training = _fact_training(coaching_engine, fix, diagnosis_model, cards)
+    retest = _fact_retest(fix)
+    appendix = _technical_appendix(metrics, scores, audio_quality, evidence_ids)
+    share_card = _share_card(scores, authority_type, mirror, diagnosis)
+    primary = _fact_primary_diagnostic(diagnosis_model, cards)
+    report_uncertainty = Uncertainty(
+        overall_confidence_label=confidence_label,  # type: ignore[arg-type]
+        suppressed_traits=psychological_inference.suppressed_traits,
+        reasons=list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons + ([diagnosis_model.uncertainty_note] if diagnosis_model and diagnosis_model.uncertainty_note else []))),
+    )
+    if duration_ms and duration_ms < 25000:
+        limited_text = "This sample does not contain enough reliable evidence for a strong authority diagnosis. Treat it as a light baseline and retest with a longer recording."
+        mirror = mirror.model_copy(
+            update={
+                "headline": "There is not enough reliable evidence for a full authority diagnosis yet.",
+                "identity_read": limited_text,
+                "one_line_identity_read": limited_text,
+                "confidence_label": "low",
+                "confidence_level": "low",
+            }
+        )
+        confidence_label = "low"
+        report_uncertainty = report_uncertainty.model_copy(update={"overall_confidence_label": "low"})
+        report_uncertainty.reasons.append("Short recording limits full report confidence")
+    if not _transcript_safe(transcript):
+        report_uncertainty.reasons.append("Transcript-specific wording was suppressed because transcript confidence was limited")
+    report = AuthorityReport(
+        mirror=mirror,
+        diagnosis=diagnosis,
+        perception_map=perception,
+        evidence_chain=cards,
+        timeline=timeline,
+        moment_intelligence=moment_intelligence or MomentIntelligence(moments=moments),
+        dimension_reports=dimension_reports,
+        hidden_cost=hidden_cost,
+        highest_leverage_fix=fix,
+        training_prescription=training,
+        retest_plan=retest,
+        authority_type=authority_type,
+        share_card=share_card,
+        technical_appendix=appendix,
+        scenario_summary=_scenario_summary(scores, fix, coaching_engine, get_scenario_profile(scenario).scenario_id),
+        diagnostic_reasoning=diagnostic_reasoning,
+        primary_diagnosis=primary,
+        secondary_diagnosis=None,
+        contradictions=diagnostic_reasoning.contradictions,
+        hidden_cost_reasoning=diagnostic_reasoning.hidden_cost_reasoning if diagnosis_model else None,
+        dimension_reasoning=diagnostic_reasoning.dimension_reasoning,
+        trait_reasoning=diagnostic_reasoning.trait_reasoning,
+        highest_leverage_reasoning=diagnostic_reasoning.highest_leverage_reasoning if diagnosis_model else None,
+        coaching_engine=coaching_engine,
+        uncertainty=report_uncertainty,
+    )
+    report = _apply_report_repetition_guard(report)
+    return report.model_copy(update={"validation": _validate_report(report, coaching_engine)})
+
+
 def _validate_report(report: AuthorityReport, coaching: CoachingEngine | None) -> ReportValidation:
     evidence_ids = {item.evidence_id for item in report.evidence_chain}
     moment_ids = {item.moment_id for item in report.timeline}
@@ -2464,13 +3904,44 @@ def _validate_report(report: AuthorityReport, coaching: CoachingEngine | None) -
     if report.training_prescription and report.training_prescription.drill_id:
         if drill_ids and report.training_prescription.drill_id not in drill_ids:
             orphan_links.append(report.training_prescription.drill_id)
+    duplicate_sections: list[str] = []
+    user_strings: list[tuple[str, str]] = []
+    if report.mirror:
+        user_strings.extend(("mirror", value) for value in [report.mirror.headline, report.mirror.identity_read] if value)
+    if report.diagnosis:
+        user_strings.extend(("diagnosis", value) for value in [report.diagnosis.core_pattern, report.diagnosis.social_consequence] if value)
+    if report.perception_map:
+        for key, value in report.perception_map.model_dump().items():
+            if value and value.get("text"):
+                user_strings.append((key, value["text"]))
+    if report.hidden_cost and report.hidden_cost.consequence:
+        user_strings.append(("hidden_cost", report.hidden_cost.consequence))
+    if report.highest_leverage_fix:
+        user_strings.extend(("highest_leverage_fix", value) for value in [report.highest_leverage_fix.plain_english, report.highest_leverage_fix.why_this_matters, report.highest_leverage_fix.action_step] if value)
+    if report.training_prescription:
+        user_strings.extend(("training_prescription", value) for value in [report.training_prescription.why_chosen, report.training_prescription.success_signal, *report.training_prescription.instructions] if value)
+    seen_norm: dict[str, str] = {}
+    for section, text in user_strings:
+        norm = _normalize_copy(text)
+        if len(norm.split()) < 5:
+            continue
+        if norm in seen_norm:
+            duplicate_sections.append(f"{seen_norm[norm]}::{section}")
+            continue
+        for prior_section, prior_text in user_strings:
+            if prior_section == section or prior_text == text:
+                continue
+            if _copy_similarity(text, prior_text) >= 0.86:
+                duplicate_sections.append(f"{prior_section}::{section}")
+                break
+        seen_norm[norm] = section
     return ReportValidation(
-        valid=not orphan_links,
+        valid=not orphan_links and not duplicate_sections,
         evidence_ids_checked=sorted(evidence_ids),
         moment_ids_checked=sorted(moment_ids),
         drill_ids_checked=sorted(drill_ids),
         orphan_links=orphan_links,
-        duplicate_sections=[],
+        duplicate_sections=list(dict.fromkeys(duplicate_sections)),
     )
 
 
@@ -2488,7 +3959,24 @@ def build_generated_report(
     duration_ms: int,
     scenario: str,
     moment_intelligence: MomentIntelligence | None = None,
+    transcript: Transcript | None = None,
 ) -> AuthorityReport:
+    return _fact_led_report(
+        scores=scores,
+        metrics=metrics,
+        psychological_inference=psychological_inference,
+        diagnostic_reasoning=diagnostic_reasoning,
+        coaching_engine=coaching_engine,
+        evidence=evidence,
+        moments=moments,
+        uncertainty=uncertainty,
+        audio_quality=audio_quality,
+        duration_ms=duration_ms,
+        scenario=scenario,
+        moment_intelligence=moment_intelligence,
+        transcript=transcript,
+    )
+
     profile = get_scenario_profile(scenario)
     confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
     if _is_insufficient_sample(metrics, audio_quality, duration_ms, confidence):

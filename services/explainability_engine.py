@@ -292,6 +292,7 @@ def build_explainability(
 ) -> ExplainabilityBundle:
     """Build deterministic claim explanations and audit metadata from existing outputs."""
     valid_evidence_ids = {item.id for item in evidence} | {item.evidence_id for item in psychological_inference.evidence_chain}
+    valid_evidence_ids.update(report.validation.evidence_ids_checked)
     valid_evidence_ids.update(
         evidence_id
         for diagnosis in [diagnostic_reasoning.primary_diagnosis, diagnostic_reasoning.secondary_diagnosis]

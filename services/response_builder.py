@@ -758,6 +758,7 @@ def run_analysis(
         duration_ms=duration_ms,
         scenario=_map_scenario(request.context),
         moment_intelligence=moment_intelligence,
+        transcript=transcription.transcript,
     )
 
     recommendations = _deterministic_recommendations(coaching_engine)

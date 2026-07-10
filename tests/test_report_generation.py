@@ -169,6 +169,7 @@ def _report_user_facing_strings(report) -> list[str]:
         "first_drill_id",
         "cost_id",
         "source_metrics",
+        "recording_fact_ids",
         "supporting_metrics",
         "start_ms",
         "end_ms",
@@ -376,7 +377,8 @@ def test_valid_report_evidence_connects_signal_interpretation_consequence_and_fi
         assert item.what_happened
         assert item.listener_interpretation
         assert item.why_it_matters
-        assert "Fix:" in item.why_it_matters
+        assert "diagnosis" in item.why_it_matters.lower() or "supporting behaviour" in item.why_it_matters.lower()
+        assert item.recording_fact_ids
         assert item.related_dimension
 
 

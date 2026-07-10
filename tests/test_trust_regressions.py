@@ -204,8 +204,8 @@ def test_primary_diagnosis_comes_from_highest_weight_evidence_when_present():
     report = _generated_report(metrics=metrics)
 
     assert report.primary_diagnosis is not None
-    assert report.evidence_chain[0].id == "low_specificity"
-    assert "proof" in report.diagnosis.core_pattern.lower()
+    assert report.evidence_chain[0].id == "unclear_path"
+    assert "structure" in report.diagnosis.core_pattern.lower()
 
 
 def test_coaching_targets_highest_expected_leverage_observation():
@@ -225,7 +225,7 @@ def test_coaching_targets_highest_expected_leverage_observation():
     report = _generated_report(metrics=metrics)
 
     assert report.highest_leverage_fix.evidence_ids[0] in {card.evidence_id for card in report.evidence_chain}
-    assert report.training_prescription.drill_id in {"one_point_one_proof_v1", "point_proof_close_v1"}
+    assert report.training_prescription.drill_id in {"one_point_one_proof_v1", "point_proof_close_v1", "answer_first_v1"}
 
 
 def test_major_report_paragraphs_have_supporting_evidence():

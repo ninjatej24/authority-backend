@@ -69,6 +69,9 @@ def _stage(stage_id: str, completed: bool, dependencies: list[str], warnings: li
 
 def _upstream_evidence_ids(response: AuthorityV2Response) -> set[str]:
     evidence_ids = {item.id for item in getattr(response, "evidence", []) or []}
+    report = getattr(response, "report", None)
+    if report:
+        evidence_ids.update(report.validation.evidence_ids_checked)
     inference = getattr(response, "psychological_inference", None)
     if inference:
         evidence_ids.update(item.evidence_id for item in inference.evidence_chain)
