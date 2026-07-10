@@ -5,6 +5,7 @@ from __future__ import annotations
 from schemas import AudioQuality, TranscriptWord, Uncertainty
 from services.linguistic_metrics import compute_delivery_metrics, build_linguistic_metrics
 from services.moment_intelligence import build_moment_intelligence
+from services.report_generation import OBSERVATION_IMPACT_WEIGHTS
 from services.transcription import _response_words, _words_from_segments
 from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
 from tests.test_moment_intelligence import _windows
@@ -145,3 +146,94 @@ def test_user_facing_copy_has_no_internal_language_or_raw_metrics():
         "observed as",
     ]
     assert not any(marker in text for marker in forbidden)
+
+
+def test_report_suppresses_diagnosis_when_evidence_is_mostly_positive():
+    report = _generated_report()
+
+    assert report.primary_diagnosis is None
+    assert report.mirror.confidence_label in {"low", "medium"}
+    assert len(report.evidence_chain) <= 3
+
+
+def test_observation_weighting_prioritises_listener_impact():
+    assert OBSERVATION_IMPACT_WEIGHTS["low_specificity"] > OBSERVATION_IMPACT_WEIGHTS["weak_structure"]
+    assert OBSERVATION_IMPACT_WEIGHTS["hesitation_clustering"] > OBSERVATION_IMPACT_WEIGHTS["weak_closing"]
+    assert OBSERVATION_IMPACT_WEIGHTS["filler_burden"] > OBSERVATION_IMPACT_WEIGHTS["low_filler_control"]
+
+
+def test_redundant_observations_merge_to_one_family_card():
+    metrics = _metrics(
+        raw={"words_per_minute": 195.0, "mid_phrase_pause_rate": 0.5},
+        rhythm={"speed_up_segments": 3, "burst_speaking_segments": 2, "rhythm_consistency": 0.35, "hesitation_windows": 2},
+        derived={"hesitation_cluster_score": 0.82},
+    )
+    report = _generated_report(metrics=metrics)
+    ids = {card.id for card in report.evidence_chain}
+
+    assert len(report.evidence_chain) <= 3
+    assert len(ids.intersection({"pace_pressure", "hesitation_clustering", "pause_ownership", "controlled_pacing"})) <= 1
+
+
+def test_timeline_only_includes_high_value_supported_proof():
+    report = _generated_report()
+    evidence_ids = {card.evidence_id for card in report.evidence_chain}
+
+    assert len(report.timeline) <= 3
+    for moment in report.timeline:
+        assert moment.evidence_ids
+        assert set(moment.evidence_ids).issubset(evidence_ids)
+        assert moment.why_it_matters
+        assert moment.listener_interpretation
+
+
+def test_primary_diagnosis_comes_from_highest_weight_evidence_when_present():
+    metrics = _metrics(
+        linguistic={
+            "specificity_score": 0.05,
+            "concreteness_score": 0.05,
+            "structure_score": 0.2,
+            "rambling_score": 0.65,
+            "repetition_rate": 0.55,
+            "opening_strength_score": 0.35,
+            "closing_strength_score": 0.35,
+        },
+        raw={"words_per_minute": 145.0},
+        rhythm={"rhythm_consistency": 0.72},
+    )
+    report = _generated_report(metrics=metrics)
+
+    assert report.primary_diagnosis is not None
+    assert report.evidence_chain[0].id == "low_specificity"
+    assert "proof" in report.diagnosis.core_pattern.lower()
+
+
+def test_coaching_targets_highest_expected_leverage_observation():
+    metrics = _metrics(
+        linguistic={
+            "specificity_score": 0.05,
+            "concreteness_score": 0.05,
+            "structure_score": 0.2,
+            "rambling_score": 0.65,
+            "repetition_rate": 0.55,
+            "opening_strength_score": 0.35,
+            "closing_strength_score": 0.35,
+        },
+        raw={"words_per_minute": 145.0},
+        rhythm={"rhythm_consistency": 0.72},
+    )
+    report = _generated_report(metrics=metrics)
+
+    assert report.highest_leverage_fix.evidence_ids[0] in {card.evidence_id for card in report.evidence_chain}
+    assert report.training_prescription.drill_id in {"one_point_one_proof_v1", "point_proof_close_v1"}
+
+
+def test_major_report_paragraphs_have_supporting_evidence():
+    report = _generated_report()
+
+    assert report.mirror.evidence_ids
+    assert report.diagnosis.evidence_ids
+    assert report.perception_map.first_impression.evidence_ids
+    assert report.hidden_cost.evidence_ids
+    assert report.highest_leverage_fix.evidence_ids
+    assert report.training_prescription.evidence_ids

@@ -139,6 +139,8 @@ class BehaviourObservation:
     source_metrics: tuple[str, ...] = ()
     start_ms: int | None = None
     end_ms: int | None = None
+    impact_weight: float = 0.0
+    expected_leverage: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -430,6 +432,50 @@ def _observation_family(observation: BehaviourObservation) -> str:
     return _family_for_id(observation.id, observation.dimension)
 
 
+OBSERVATION_IMPACT_WEIGHTS = {
+    "low_filler_control": 0.18,
+    "controlled_pacing": 0.38,
+    "strong_opening": 0.45,
+    "strong_structure": 0.52,
+    "dynamic_emphasis": 0.55,
+    "strong_specificity": 0.58,
+    "filler_burden": 0.48,
+    "rising_endings": 0.58,
+    "weak_closing": 0.64,
+    "monotony": 0.7,
+    "pace_pressure": 0.78,
+    "weak_structure": 0.84,
+    "hesitation_clustering": 0.94,
+    "low_specificity": 1.0,
+}
+
+
+OBSERVATION_TRAINABILITY = {
+    "low_specificity": 0.92,
+    "weak_structure": 0.9,
+    "weak_closing": 0.88,
+    "pace_pressure": 0.86,
+    "hesitation_clustering": 0.84,
+    "rising_endings": 0.82,
+    "filler_burden": 0.78,
+    "monotony": 0.72,
+}
+
+
+def _observation_impact(observation_id: str, confidence: float, source_count: int, has_timestamp: bool) -> float:
+    base = OBSERVATION_IMPACT_WEIGHTS.get(observation_id, 0.5)
+    evidence_bonus = min(0.08, max(0, source_count - 1) * 0.04)
+    timestamp_bonus = 0.04 if has_timestamp else 0.0
+    return round(min(1.0, base * (0.72 + confidence * 0.28) + evidence_bonus + timestamp_bonus), 3)
+
+
+def _observation_leverage(observation_id: str, direction: str, confidence: float, impact: float) -> float:
+    if direction != "negative":
+        return round(impact * confidence * 0.35, 3)
+    trainability = OBSERVATION_TRAINABILITY.get(observation_id, 0.7)
+    return round(impact * confidence * trainability, 3)
+
+
 def _recording_quality_factor(duration_ms: int, audio_quality: AudioQuality, base_confidence: float) -> float:
     factor = max(0.35, min(1.0, base_confidence))
     if duration_ms and duration_ms < 25000:
@@ -450,7 +496,7 @@ def _drill_for_diagnosis(diagnosis_id: str, coaching: CoachingEngine | None) -> 
     category_map = {
         "thinks_faster_than_structure": {"pace_regulation", "pause_ownership", "composure"},
         "explains_without_landing": {"declarative_finality", "closing_strength"},
-        "clear_idea_weak_proof": {"specificity", "structure_compression", "persuasion"},
+        "clear_idea_weak_proof": {"specificity", "structure_compression"},
         "polished_but_flat": {"dynamic_emphasis", "presence"},
         "searches_while_speaking": {"filler_reduction", "clarity"},
         "controlled_when_you_create_space": {"pause_ownership", "command"},
@@ -466,9 +512,39 @@ def _drill_for_diagnosis(diagnosis_id: str, coaching: CoachingEngine | None) -> 
     by_id = {item.drill_id: item for item in coaching.drill_library}
     for candidate in candidates:
         drill = by_id.get(candidate.drill_id)
-        if drill and (drill.category in preferred or set(drill.target_dimensions).intersection(preferred)):
+        if drill and drill.category in preferred:
+            return drill.drill_id
+    for drill in coaching.drill_library:
+        if drill.category in preferred:
+            return drill.drill_id
+    for candidate in candidates:
+        drill = by_id.get(candidate.drill_id)
+        if drill and set(drill.target_dimensions).intersection(preferred):
+            return drill.drill_id
+    for drill in coaching.drill_library:
+        if set(drill.target_dimensions).intersection(preferred):
             return drill.drill_id
     return primary.drill_id if primary else None
+
+
+def _fallback_drill_for_observation(observation_id: str | None, coaching: CoachingEngine | None) -> str | None:
+    preferred = {
+        "strong_structure": "point_proof_close_v1",
+        "strong_specificity": "one_point_one_proof_v1",
+        "pause_ownership": "pause_ownership_v1",
+        "dynamic_emphasis": "emphasis_ladder_v1",
+        "controlled_pacing": "pace_anchor_v1",
+        "weak_structure": "point_proof_close_v1",
+        "low_specificity": "one_point_one_proof_v1",
+        "hesitation_clustering": "pressure_reset_v1",
+        "pace_pressure": "pace_anchor_v1",
+        "weak_closing": "drop_the_landing_v1",
+        "rising_endings": "drop_the_landing_v1",
+    }.get(observation_id or "")
+    if not preferred or not coaching:
+        return preferred
+    drill_ids = {drill.drill_id for drill in coaching.drill_library}
+    return preferred if preferred in drill_ids else None
 
 
 def _competing_diagnoses(
@@ -508,14 +584,14 @@ def _competing_diagnoses(
                 or _observation_family(item) in families
             )
         )
-        severity = sum(item.confidence * (1.2 if item.direction == "negative" else 0.65) for item in support)
-        trainability = 0.18 if seed.direction == "negative" else 0.08
-        authority_impact = 0.18 if seed.dimension in {"Command", "Structure", "Persuasion", "Composure"} else 0.1
-        contradict_score = sum(item.confidence * 0.72 for item in contradict)
-        breadth = min(0.2, len({item.dimension for item in support}) * 0.05)
-        raw_score = max(0.0, severity + trainability + authority_impact + breadth - contradict_score)
-        denominator = max(len(support) + len(contradict), 1)
-        confidence = round(min(0.94, max(0.28, (raw_score / denominator) * quality_factor + 0.22)), 2)
+        listener_impact = sum(item.impact_weight * item.confidence for item in support)
+        leverage = sum(item.expected_leverage for item in support)
+        contradiction_weight = sum(item.impact_weight * item.confidence * 0.9 for item in contradict)
+        breadth = min(0.16, (len({item.dimension for item in support}) + len({_observation_family(item) for item in support})) * 0.035)
+        first_mention = max((item.impact_weight * item.confidence for item in support), default=0.0)
+        raw_score = max(0.0, listener_impact * 0.55 + leverage * 0.25 + first_mention * 0.25 + breadth - contradiction_weight)
+        denominator = max(sum(item.impact_weight for item in support) + sum(item.impact_weight for item in contradict) * 0.75, 1.0)
+        confidence = round(min(0.94, max(0.18, (raw_score / denominator) * quality_factor + 0.16)), 2)
         secondary_dimensions = tuple(
             item for item in dict.fromkeys(obs.dimension for obs in support if obs.dimension != seed.dimension)
         )
@@ -545,7 +621,16 @@ def _competing_diagnoses(
             )
         )
 
-    ordered = sorted(diagnoses, key=lambda item: (item.confidence, len(item.supporting_observations), -len(item.contradicting_observations)), reverse=True)
+    ordered = sorted(
+        diagnoses,
+        key=lambda item: (
+            max((obs.impact_weight * obs.confidence for obs in item.supporting_observations), default=0.0),
+            sum(obs.expected_leverage for obs in item.supporting_observations),
+            item.confidence,
+            -sum(obs.impact_weight for obs in item.contradicting_observations),
+        ),
+        reverse=True,
+    )
     if not ordered:
         return []
     top = ordered[0]
@@ -565,7 +650,7 @@ def _competing_diagnoses(
             social_consequence=diagnosis.social_consequence,
             primary_dimension=diagnosis.primary_dimension,
             secondary_dimensions=diagnosis.secondary_dimensions,
-            confidence=round(max(0.28, diagnosis.confidence - max(0.0, 0.18 - margin)), 2),
+            confidence=round(max(0.0, diagnosis.confidence - max(0.0, 0.18 - margin)), 2),
             supporting_observations=diagnosis.supporting_observations,
             contradicting_observations=diagnosis.contradicting_observations,
             evidence_ids=diagnosis.evidence_ids,
@@ -595,17 +680,36 @@ def _select_behaviour_diagnosis(
         or len({_observation_family(item) for item in diagnosis.supporting_observations}) >= 2
         or len({item.dimension for item in diagnosis.supporting_observations}) >= 2
     ]
-    selected = max(viable or diagnoses, key=lambda item: (item.confidence, len(item.supporting_observations)))
+    selected = max(
+        viable or diagnoses,
+        key=lambda item: (
+            max((obs.impact_weight * obs.confidence for obs in item.supporting_observations), default=0.0),
+            sum(obs.expected_leverage for obs in item.supporting_observations),
+            item.confidence,
+        ),
+    )
     independent_families = {_observation_family(item) for item in selected.supporting_observations}
     independent_dimensions = {item.dimension for item in selected.supporting_observations}
+    negative_support = [item for item in selected.supporting_observations if item.direction == "negative"]
     timestamped_support = [
         item for item in selected.supporting_observations
         if item.start_ms is not None and item.end_ms is not None and item.end_ms > item.start_ms
     ]
     reliability_penalty = 0.0 if timestamped_support else 0.06
-    contradiction_penalty = min(0.18, len(selected.contradicting_observations) * 0.04)
+    contradiction_penalty = min(0.28, sum(item.impact_weight for item in selected.contradicting_observations) * 0.12)
     adjusted_confidence = round(max(0.0, selected.confidence - reliability_penalty - contradiction_penalty), 2)
-    if adjusted_confidence < 0.42 or (len(selected.supporting_observations) < 2 and len(independent_families) < 2 and len(independent_dimensions) < 2):
+    has_independent_support = len(selected.supporting_observations) >= 2 and (len(independent_families) >= 2 or len(independent_dimensions) >= 2)
+    has_high_value_focus = any(item.impact_weight >= 0.82 and item.confidence >= 0.68 for item in selected.supporting_observations)
+    contradiction_load = sum(item.impact_weight for item in selected.contradicting_observations)
+    if (
+        adjusted_confidence < 0.62
+        or not has_independent_support
+        or not has_high_value_focus
+        or not negative_support
+        or contradiction_load >= sum(item.impact_weight for item in selected.supporting_observations) * 0.45
+        or (duration_ms and duration_ms < 25000)
+        or not audio_quality.usable
+    ):
         return None
     return selected if adjusted_confidence == selected.confidence else BehaviourDiagnosis(
         id=selected.id,
@@ -630,21 +734,23 @@ def _select_behaviour_diagnosis(
 
 def _diagnosis_observations(observations: list[BehaviourObservation], diagnosis: BehaviourDiagnosis | None) -> list[BehaviourObservation]:
     if diagnosis is None:
-        return observations[:5]
+        return observations[:3]
     selected: list[ReportEvidenceCard] = []
     selected_observations: list[BehaviourObservation] = []
     for observation in diagnosis.supporting_observations:
         if observation not in selected_observations:
             selected_observations.append(observation)
-    if diagnosis.contradicting_observations and len(selected_observations) < 5:
-        selected_observations.append(diagnosis.contradicting_observations[0])
+    if diagnosis.contradicting_observations and len(selected_observations) < 3:
+        counter = max(diagnosis.contradicting_observations, key=lambda item: item.impact_weight)
+        if counter.impact_weight >= 0.7:
+            selected_observations.append(counter)
     if len(selected_observations) < 3:
         for observation in observations:
             if observation not in selected_observations:
                 selected_observations.append(observation)
             if len(selected_observations) >= min(3, len(observations)):
                 break
-    return selected_observations[:5]
+    return sorted(selected_observations, key=lambda item: (item.impact_weight, item.expected_leverage, item.confidence), reverse=True)[:3]
 
 
 def _diagnosis_with_evidence(diagnosis: BehaviourDiagnosis | None, evidence_cards: list[ReportEvidenceCard]) -> BehaviourDiagnosis | None:
@@ -653,6 +759,8 @@ def _diagnosis_with_evidence(diagnosis: BehaviourDiagnosis | None, evidence_card
     visible = {card.id for card in evidence_cards}
     support = tuple(obs for obs in diagnosis.supporting_observations if obs.id in visible)
     contradict = tuple(obs for obs in diagnosis.contradicting_observations if obs.id in visible)
+    if not support:
+        return None
     return BehaviourDiagnosis(
         id=diagnosis.id,
         label_internal=diagnosis.label_internal,
@@ -664,7 +772,7 @@ def _diagnosis_with_evidence(diagnosis: BehaviourDiagnosis | None, evidence_card
         primary_dimension=diagnosis.primary_dimension,
         secondary_dimensions=diagnosis.secondary_dimensions,
         confidence=diagnosis.confidence,
-        supporting_observations=support or diagnosis.supporting_observations,
+        supporting_observations=support,
         contradicting_observations=contradict,
         evidence_ids=tuple(card.evidence_id for card in evidence_cards if card.id in {obs.id for obs in support} or not support),
         moment_ids=diagnosis.moment_ids,
@@ -897,7 +1005,7 @@ def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityT
     elif not negative:
         first_text = f"The first impression {phrase} that you are easiest to trust when {pos}. The report does not have a strong enough negative behaviour to make a sharper limiting claim."
         professional_text = f"Professionally, the clearest read is behavioural: {pos}."
-        status_text = "The status signal is best supported by the controlled behaviour in the evidence, rather than by a strong negative drag."
+        status_text = "The status signal comes from the controlled behaviour in the evidence, rather than from a strong negative drag."
         emotional_text = f"The emotional read is not fixed personality. In this recording, the listener likely feels steadier when {pos}."
         interview_text = f"In an interview, this would likely be easiest to trust where {pos}."
         leadership_text = f"The leadership signal comes from the moments where {pos}; a sharper limiter needs more negative evidence."
@@ -1415,6 +1523,10 @@ def _observation_from_template(
     if weak_sample:
         observed = _soften(observed, confidence, weak_sample)
 
+    has_timestamp = start_ms is not None and end_ms is not None and end_ms > start_ms
+    impact = _observation_impact(template.id, card_confidence, len(source), has_timestamp)
+    leverage = _observation_leverage(template.id, template.direction, card_confidence, impact)
+
     return BehaviourObservation(
         id=template.id,
         dimension=template.dimension,
@@ -1429,6 +1541,8 @@ def _observation_from_template(
         source_metrics=tuple(_plain_metric_label(signal.metric) for signal in source),
         start_ms=start_ms,
         end_ms=end_ms,
+        impact_weight=impact,
+        expected_leverage=leverage,
     )
 
 
@@ -1468,16 +1582,19 @@ def _rank_evidence_cards(cards: list[ReportEvidenceCard], diagnosis: DiagnosticR
         drill_evidence.update(coaching.selected_interventions.primary_drill.supporting_evidence_ids)
 
     def score(card: ReportEvidenceCard) -> tuple[float, float]:
-        value = card.confidence
+        impact = OBSERVATION_IMPACT_WEIGHTS.get(card.id or "", 0.5)
+        value = card.confidence * 0.35 + impact * 0.65
         if card.direction == "negative":
             value += 0.12
         if card.related_dimension in limiter_dims or (card.trait or "") in limiter_dims:
             value += 0.1
         if card.evidence_id in drill_evidence:
             value += 0.12
+        if card.id == "low_specificity":
+            value += 0.16
         if card.id in {"controlled_pacing", "low_filler_control", "strong_opening", "dynamic_emphasis", "strong_specificity", "strong_structure", "pause_ownership"}:
             value += 0.04
-        return value, card.confidence
+        return value, impact
 
     ordered = sorted(cards, key=score, reverse=True)
     selected: list[ReportEvidenceCard] = []
@@ -1508,7 +1625,7 @@ def _rank_evidence_cards(cards: list[ReportEvidenceCard], diagnosis: DiagnosticR
         selected.append(card)
         families.add(family)
         dimensions.add(card.related_dimension)
-        if len(selected) == 5:
+        if len(selected) == 3:
             break
     if len(selected) < 3:
         for card in ordered:
@@ -1526,12 +1643,27 @@ def _rank_evidence_cards(cards: list[ReportEvidenceCard], diagnosis: DiagnosticR
         negative = next((card for card in ordered if card.direction == "negative" and card not in selected), None)
         if negative and len(selected) >= 3:
             selected[-1:] = [negative]
-    return selected[:5]
+    return selected[:3]
 
 
 def _rank_observations(observations: list[BehaviourObservation], diagnostic: DiagnosticReasoning, coaching: CoachingEngine | None) -> list[BehaviourObservation]:
     if not observations:
         return []
+    merged_by_family: dict[str, BehaviourObservation] = {}
+    for observation in observations:
+        family = _observation_family(observation)
+        existing = merged_by_family.get(family)
+        if existing is None or (
+            observation.impact_weight,
+            observation.expected_leverage,
+            observation.confidence,
+        ) > (
+            existing.impact_weight,
+            existing.expected_leverage,
+            existing.confidence,
+        ):
+            merged_by_family[family] = observation
+    observations = list(merged_by_family.values())
     cards = [_card_from_observation(observation) for observation in observations]
     ranked_cards = _rank_evidence_cards(cards, diagnostic, coaching)
     by_key = {(observation.id, observation.evidence_id): observation for observation in observations}
@@ -1540,7 +1672,7 @@ def _rank_observations(observations: list[BehaviourObservation], diagnostic: Dia
         for card in ranked_cards
         if (card.id, card.evidence_id) in by_key
     ]
-    for observation in sorted(observations, key=lambda item: item.confidence, reverse=True):
+    for observation in sorted(observations, key=lambda item: (item.impact_weight, item.expected_leverage, item.confidence), reverse=True):
         if observation not in ranked:
             ranked.append(observation)
     return ranked
@@ -1588,6 +1720,8 @@ def _behaviour_observations(
             confidence=round(0.6 if item.direction == "positive" else 0.55, 2),
             start_ms=moment.start_ms if moment and moment.end_ms > moment.start_ms else None,
             end_ms=moment.end_ms if moment and moment.end_ms > moment.start_ms else None,
+            impact_weight=0.35,
+            expected_leverage=0.12,
         )
         for item in evidence[:3]
     ]
@@ -1757,7 +1891,13 @@ def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int, 
         if confidence < 0.4:
             continue
         moment_evidence = [item for item in moment.supporting_evidence_ids if item in evidence_ids] or evidence_ids[:3]
+        if not moment_evidence:
+            continue
+        if moment.importance_score < 0.5 and confidence < 0.65:
+            continue
         headline, summary, interpretation, why = _moment_copy(moment, duration_ms)
+        if not all((headline.strip(), summary.strip(), interpretation.strip(), (why or "").strip())):
+            continue
         items.append(
             ReportTimelineItem(
                 moment_id=moment.moment_id,
@@ -1784,7 +1924,7 @@ def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int, 
                 preview_visible_free=moment.preview_visible_free,
             )
         )
-    return items
+    return sorted(items, key=lambda item: (item.importance_score, item.confidence), reverse=True)[:3]
 
 
 def _moment_group(moment_type: str) -> str:
@@ -1910,9 +2050,12 @@ def _expected_score_lift_label(primary, reasoning) -> str | None:
 def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: DiagnosticReasoning, evidence_ids: list[str], evidence_cards: list[ReportEvidenceCard], diagnosis_model: BehaviourDiagnosis | None) -> ReportHighestLeverageFix:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
+    if diagnosis_model and diagnosis_model.drill_id and coaching:
+        drill = next((item for item in coaching.drill_library if item.drill_id == diagnosis_model.drill_id), None)
     if primary and coaching:
-        drill = next((item for item in coaching.drill_library if item.drill_id == primary.drill_id), None)
+        drill = drill or next((item for item in coaching.drill_library if item.drill_id == primary.drill_id), None)
     reasoning = diagnostic.highest_leverage_reasoning
+    fallback_drill_id = None
     linked = primary.supporting_evidence_ids if primary else (reasoning.supporting_evidence if reasoning else evidence_ids)
     linked = [item for item in linked if item in evidence_ids] or evidence_ids
     issue = drill.title if drill else (reasoning.issue_id.replace("_", " ") if reasoning and reasoning.issue_id else "Practice focus")
@@ -1922,11 +2065,13 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
     behaviour = _card_behaviour(focus_card)
     if diagnosis_model:
         linked = [item for item in diagnosis_model.evidence_ids if item in evidence_ids] or linked
+        focus_observation = max(diagnosis_model.supporting_observations, key=lambda item: item.expected_leverage)
         plain = f"The fastest improvement is to change the behaviour behind the report: {_lower_first(diagnosis_model.one_sentence_pattern)}"
-        action_step = _sentence(diagnosis_model.fix_category)
-        why = f"This matters because {_lower_first(diagnosis_model.listener_interpretation)} {_without_period(diagnosis_model.social_consequence)}."
-        success = f"The next recording should make this behaviour sound more deliberate: {_lower_first(diagnosis_model.observed_behaviour)}"
+        action_step = focus_observation.fix
+        why = f"This matters because {_lower_first(focus_observation.listener_interpretation)} {_without_period(focus_observation.consequence)}."
+        success = f"The next recording should make this behaviour easier to hear: {_lower_first(focus_observation.behaviour)}"
     elif focus_card and behaviour:
+        fallback_drill_id = _fallback_drill_for_observation(focus_card.id, coaching)
         plain = (
             f"The fastest improvement is to change the behaviour where {behaviour}."
             if focus_card.direction == "negative"
@@ -1946,7 +2091,7 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
         why_this_matters=why,
         expected_score_lift=_expected_score_lift_label(primary, reasoning),
         target_dimensions=drill.target_dimensions if drill else (reasoning.affected_dimensions if reasoning else []),
-        first_drill_id=drill.drill_id if drill else (reasoning.recommended_first_drill if reasoning else None),
+        first_drill_id=drill.drill_id if drill else (diagnosis_model.drill_id if diagnosis_model else (fallback_drill_id or (reasoning.recommended_first_drill if reasoning else None))),
         action_step=action_step,
         success_signal=success,
         duration_min=duration,
@@ -1958,8 +2103,10 @@ def _highest_leverage_fix(coaching: CoachingEngine | None, diagnostic: Diagnosti
 def _training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFix, evidence_cards: list[ReportEvidenceCard], diagnosis_model: BehaviourDiagnosis | None) -> ReportTrainingPrescription:
     primary = coaching.selected_interventions.primary_drill if coaching else None
     drill = None
+    if fix.first_drill_id and coaching:
+        drill = next((item for item in coaching.drill_library if item.drill_id == fix.first_drill_id), None)
     if primary and coaching:
-        drill = next((item for item in coaching.drill_library if item.drill_id == primary.drill_id), None)
+        drill = drill or next((item for item in coaching.drill_library if item.drill_id == primary.drill_id), None)
     if drill:
         focus_card = _primary_negative(evidence_cards) or _primary_positive(evidence_cards)
         why_chosen = (
@@ -2371,9 +2518,18 @@ def build_generated_report(
     diagnosis_model = _select_behaviour_diagnosis(observations, confidence, duration_ms, audio_quality, coaching_engine)
     selected_observations = _diagnosis_observations(observations, diagnosis_model)
     evidence_cards = _rank_evidence_cards([_card_from_observation(item) for item in selected_observations], diagnostic_reasoning, coaching_engine)[:5]
-    evidence_ids = [item.evidence_id for item in evidence_cards[:5]]
+    evidence_ids = [item.evidence_id for item in evidence_cards[:3]]
     diagnosis_model = _diagnosis_with_evidence(diagnosis_model, evidence_cards)
     diagnostic_reasoning = _reconciled_diagnostic_reasoning(diagnostic_reasoning, diagnosis_model, evidence_ids)
+    if diagnosis_model is None:
+        diagnostic_reasoning = diagnostic_reasoning.model_copy(
+            update={
+                "primary_diagnosis": None,
+                "secondary_diagnosis": None,
+                "hidden_cost_reasoning": None,
+                "highest_leverage_reasoning": None,
+            }
+        )
     if not diagnosis_model and diagnostic_reasoning.primary_diagnosis and diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids:
         evidence_ids = _visible_evidence_ids(diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids, evidence_cards)
     dims = _ordered_dimensions(scores)
@@ -2381,6 +2537,8 @@ def build_generated_report(
     limiter = DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
     authority_type = _authority_type(scores, evidence_ids, confidence)
     diagnosis_confidence = min(confidence, diagnosis_model.confidence if diagnosis_model else confidence)
+    if diagnosis_model is None:
+        diagnosis_confidence = min(diagnosis_confidence, 0.59)
     visible_contradictions = [
         card for card in evidence_cards
         if diagnosis_model and card.direction == "negative" and card.evidence_id not in diagnosis_model.evidence_ids

@@ -226,9 +226,27 @@ def test_invalid_drills_and_dependency_references_are_reported():
 
 
 def test_claim_fails_with_insufficient_upstream_evidence_but_metric_backed_score_succeeds():
-    report = _generated_report()
-    diagnostic = report.diagnostic_reasoning.model_copy(update={"primary_diagnosis": report.primary_diagnosis.model_copy(update={"supporting_evidence_ids": []})})
-    bundle = _bundle(diagnostic_reasoning=diagnostic, report=report)
+    metrics = _metrics(
+        linguistic={
+            "specificity_score": 0.05,
+            "concreteness_score": 0.05,
+            "structure_score": 0.2,
+            "rambling_score": 0.65,
+            "repetition_rate": 0.55,
+            "opening_strength_score": 0.35,
+            "closing_strength_score": 0.35,
+        },
+        raw={"words_per_minute": 145.0},
+        rhythm={"rhythm_consistency": 0.72},
+    )
+    inference = _infer(metrics, duration_ms=60000)
+    report = _generated_report(metrics=metrics, inference=inference)
+    assert report.primary_diagnosis is not None
+
+    diagnostic = report.diagnostic_reasoning.model_copy(
+        update={"primary_diagnosis": report.primary_diagnosis.model_copy(update={"supporting_evidence_ids": []})}
+    )
+    bundle = _bundle(metrics=metrics, inference=inference, diagnostic_reasoning=diagnostic, report=report)
 
     assert "missing_upstream_dependency" in _claim(bundle, "primary_diagnosis").validation.failed_checks
     assert _claim(bundle, "authority_score").validation.valid is True
