@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from schemas import AudioQuality, Uncertainty
+import re
+
+from schemas import AudioQuality, Moment, Uncertainty
 from services.deterministic_coaching import build_deterministic_coaching
 from services.report_builder import build_report
 from services.report_generation import (
@@ -27,6 +29,22 @@ RAW_MAIN_MARKERS = {
     "speed_up_segments",
     "hesitation_cluster_score",
     "words_per_minute",
+}
+
+INTERNAL_COPY_MARKERS = {
+    "winning diagnosis",
+    "evidence item",
+    "hypothesis",
+    "observed as",
+    "deterministic",
+    "selected focus",
+    "attached to this issue",
+    "raw_acoustic.",
+    "linguistic.",
+    "rhythm.",
+    "derived.",
+    "vad.",
+    "backend",
 }
 
 
@@ -122,6 +140,60 @@ def _user_facing_copy(report) -> list[str]:
         *(item.summary for item in report.timeline),
         *(item.listener_interpretation for item in report.timeline),
     ]
+
+
+def _report_user_facing_strings(report) -> list[str]:
+    sections = {
+        "mirror": report.mirror.model_dump(),
+        "diagnosis": report.diagnosis.model_dump(),
+        "perception_map": report.perception_map.model_dump(),
+        "evidence_chain": [item.model_dump() for item in report.evidence_chain],
+        "timeline": [item.model_dump() for item in report.timeline],
+        "hidden_cost": report.hidden_cost.model_dump(),
+        "highest_leverage_fix": report.highest_leverage_fix.model_dump(),
+        "training_prescription": report.training_prescription.model_dump(),
+        "retest_plan": report.retest_plan.model_dump(),
+    }
+    ignored_keys = {
+        "id",
+        "evidence_id",
+        "evidence_ids",
+        "supporting_evidence_ids",
+        "linked_evidence",
+        "moment_id",
+        "type",
+        "moment_group",
+        "severity",
+        "word_ids",
+        "drill_id",
+        "first_drill_id",
+        "cost_id",
+        "source_metrics",
+        "supporting_metrics",
+        "start_ms",
+        "end_ms",
+        "timestamp",
+        "confidence",
+        "selection_score",
+        "duration_min",
+        "recommended_retest_after_days",
+    }
+    strings: list[str] = []
+
+    def walk(value, key: str = ""):
+        if key in ignored_keys:
+            return
+        if isinstance(value, str):
+            strings.append(value)
+        elif isinstance(value, dict):
+            for child_key, child_value in value.items():
+                walk(child_value, child_key)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key)
+
+    walk(sections)
+    return strings
 
 
 def test_premium_report_contains_all_required_sections_and_validation():
@@ -226,6 +298,34 @@ def test_main_report_copy_does_not_expose_raw_metric_keys():
 
     for marker in RAW_MAIN_MARKERS:
         assert marker not in main_text
+
+
+def test_user_facing_report_sections_have_no_raw_or_internal_language():
+    report = _generated_report()
+    strings = _report_user_facing_strings(report)
+    copy = " ".join(strings).lower()
+
+    for marker in INTERNAL_COPY_MARKERS:
+        assert marker not in copy
+    assert not re.search(r"\b[a-z]+_[a-z0-9_]+\b", copy)
+
+
+def test_empty_or_no_speech_sample_returns_insufficient_report():
+    metrics = _metrics(vad={"speech_ratio": 0.0, "total_speech_duration_ms": 0}, linguistic={"filler_words_per_min": 0.0})
+    scores = _scores().model_copy(update={"score_confidence": 0.2})
+    audio_quality = AudioQuality(usable=False, background_noise_level="unknown", quality_warnings=["No usable speech detected"])
+    report = _generated_report(scores=scores, metrics=metrics, audio_quality=audio_quality, duration_ms=720)
+
+    assert "not enough usable speech" in report.mirror.headline.lower()
+    assert report.authority_type.label == "Insufficient Sample"
+    assert report.primary_diagnosis is None
+    assert report.diagnosis.primary_strength_dimension is None
+    assert report.diagnosis.primary_limiting_dimension is None
+    assert len(report.evidence_chain) == 1
+    assert report.evidence_chain[0].related_dimension == "Sample quality"
+    assert report.timeline == []
+    assert "30 to 60 second" in report.training_prescription.why_chosen.lower() or "30 to 60 second" in " ".join(report.training_prescription.instructions).lower()
+    assert report.share_card.percentile_label is None
 
 
 def test_zero_filler_does_not_produce_high_filler_warning():
@@ -414,6 +514,44 @@ def test_evidence_and_timeline_are_filtered_to_winning_story():
     assert len(report.evidence_chain) <= 5
     assert all(item.evidence_ids for item in report.timeline)
     assert all(set(item.evidence_ids).issubset({card.evidence_id for card in report.evidence_chain}) for item in report.timeline)
+
+
+def test_timeline_suppresses_invalid_and_generic_moments():
+    moments = [
+        Moment(
+            moment_id="bad_time",
+            type="strongest_moment",
+            start_ms=5000,
+            end_ms=4000,
+            headline="Invalid timing",
+            summary="This should not appear.",
+            confidence=0.9,
+            severity="medium",
+        ),
+        Moment(
+            moment_id="generic",
+            type="generic",
+            start_ms=1000,
+            end_ms=3000,
+            headline="Generic",
+            summary="This should not appear.",
+            confidence=0.9,
+            severity="medium",
+        ),
+        Moment(
+            moment_id="valid",
+            type="strongest_moment",
+            start_ms=1000,
+            end_ms=4000,
+            headline="Most controlled stretch",
+            summary="The delivery had a clear shape here.",
+            confidence=0.8,
+            severity="medium",
+        ),
+    ]
+    report = _generated_report(moments=moments)
+
+    assert [item.moment_id for item in report.timeline] == ["valid"]
 
 
 def test_evidence_cards_support_report_diagnosis_or_clarify_uncertainty():

@@ -271,3 +271,37 @@ def test_report_ready_candidates_reference_evidence_ids():
     assert result.report_candidates.report_priority_order
     candidate = result.primary_candidates.primary_strength_candidate
     assert candidate.evidence_ids
+
+
+def test_zero_filler_emits_no_high_filler_evidence():
+    result = _infer(_metrics(linguistic={"filler_words_per_min": 0.0}))
+    evidence_ids = {item.evidence_id for item in result.evidence_chain}
+
+    assert "psi_ev_high_fillers" not in evidence_ids
+    assert "psi_ev_very_high_fillers" not in evidence_ids
+    assert list(evidence_ids).count("psi_ev_low_fillers") <= 1
+
+
+def test_threshold_evidence_is_mutually_exclusive():
+    result = _infer(_metrics())
+    evidence_ids = {item.evidence_id for item in result.evidence_chain}
+    mutually_exclusive = [
+        ("psi_ev_dynamic_emphasis_high", "psi_ev_dynamic_emphasis_low"),
+        ("psi_ev_pitch_variation_healthy", "psi_ev_pitch_variation_low"),
+        ("psi_ev_energy_variation_healthy", "psi_ev_energy_variation_low"),
+        ("psi_ev_opening_strong", "psi_ev_opening_weak"),
+        ("psi_ev_structure_high", "psi_ev_structure_low"),
+        ("psi_ev_specificity_high", "psi_ev_specificity_low"),
+        ("psi_ev_rambling_low", "psi_ev_rambling_high"),
+    ]
+
+    for positive, negative in mutually_exclusive:
+        assert not ({positive, negative} <= evidence_ids)
+
+
+def test_missing_metric_does_not_emit_positive_or_negative_evidence():
+    result = _infer(_metrics(derived={"dynamic_emphasis_score": None}))
+    evidence_ids = {item.evidence_id for item in result.evidence_chain}
+
+    assert "psi_ev_dynamic_emphasis_high" not in evidence_ids
+    assert "psi_ev_dynamic_emphasis_low" not in evidence_ids

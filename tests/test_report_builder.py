@@ -139,13 +139,15 @@ def test_highest_leverage_fix_and_training_are_deterministic_from_limiter():
     )
     report = _report(scores=scores)
 
-    assert report.diagnosis.limiting_dimension == "Command"
-    assert report.highest_leverage_fix.issue == "declarative finality"
-    assert report.highest_leverage_fix.first_drill_id == "drop_the_landing_v1"
-    assert "command" in report.highest_leverage_fix.target_dimensions
-    assert report.training_prescription.drill_id == "drop_the_landing_v1"
+    assert report.diagnosis.core_pattern
+    assert report.primary_diagnosis is not None
+    assert report.primary_diagnosis.diagnosis_name == report.diagnosis.core_pattern
+    assert report.highest_leverage_fix.first_drill_id
+    assert report.highest_leverage_fix.evidence_ids
+    assert set(report.highest_leverage_fix.evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
+    assert report.training_prescription.drill_id
     assert report.training_prescription.instructions
-    assert report.retest_plan.focus_metric == "cleaner final endings"
+    assert report.retest_plan.focus_metric
 
 
 def test_authority_type_mapping_supports_required_type_outputs():

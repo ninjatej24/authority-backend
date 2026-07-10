@@ -481,8 +481,8 @@ def _competing_diagnoses(
         support = tuple(
             item for item in all_observations
             if item in group
-            or _observation_family(item) in families
-            or (item.direction == "positive" and item.dimension in dimensions)
+            or (_observation_family(item) in families and item.direction == seed.direction)
+            or (seed.direction == "positive" and item.direction == "positive" and item.dimension in dimensions)
         )
         contradict = tuple(
             item for item in all_observations
@@ -572,7 +572,45 @@ def _select_behaviour_diagnosis(
     coaching: CoachingEngine | None,
 ) -> BehaviourDiagnosis | None:
     diagnoses = _competing_diagnoses(observations, confidence, duration_ms, audio_quality, coaching)
-    return diagnoses[0] if diagnoses else None
+    if not diagnoses:
+        return None
+    viable = [
+        diagnosis for diagnosis in diagnoses
+        if len(diagnosis.supporting_observations) >= 2
+        or len({_observation_family(item) for item in diagnosis.supporting_observations}) >= 2
+        or len({item.dimension for item in diagnosis.supporting_observations}) >= 2
+    ]
+    selected = max(viable or diagnoses, key=lambda item: (item.confidence, len(item.supporting_observations)))
+    independent_families = {_observation_family(item) for item in selected.supporting_observations}
+    independent_dimensions = {item.dimension for item in selected.supporting_observations}
+    timestamped_support = [
+        item for item in selected.supporting_observations
+        if item.start_ms is not None and item.end_ms is not None and item.end_ms > item.start_ms
+    ]
+    reliability_penalty = 0.0 if timestamped_support else 0.06
+    contradiction_penalty = min(0.18, len(selected.contradicting_observations) * 0.04)
+    adjusted_confidence = round(max(0.0, selected.confidence - reliability_penalty - contradiction_penalty), 2)
+    if adjusted_confidence < 0.42 or (len(selected.supporting_observations) < 2 and len(independent_families) < 2 and len(independent_dimensions) < 2):
+        return None
+    return selected if adjusted_confidence == selected.confidence else BehaviourDiagnosis(
+        id=selected.id,
+        label_internal=selected.label_internal,
+        user_facing_title=selected.user_facing_title,
+        one_sentence_pattern=selected.one_sentence_pattern,
+        observed_behaviour=selected.observed_behaviour,
+        listener_interpretation=selected.listener_interpretation,
+        social_consequence=selected.social_consequence,
+        primary_dimension=selected.primary_dimension,
+        secondary_dimensions=selected.secondary_dimensions,
+        confidence=adjusted_confidence,
+        supporting_observations=selected.supporting_observations,
+        contradicting_observations=selected.contradicting_observations,
+        evidence_ids=selected.evidence_ids,
+        moment_ids=selected.moment_ids,
+        fix_category=selected.fix_category,
+        drill_id=selected.drill_id,
+        uncertainty_note=selected.uncertainty_note,
+    )
 
 
 def _diagnosis_observations(observations: list[BehaviourObservation], diagnosis: BehaviourDiagnosis | None) -> list[BehaviourObservation]:
@@ -1675,8 +1713,8 @@ def _moment_supports_diagnosis(moment: Moment, diagnosis_model: BehaviourDiagnos
         "polished_but_flat": {"monotone_stretch", "high_presence_moment", "most_persuasive_moment"},
         "searches_while_speaking": {"filler_cluster", "hesitation_cluster", "best_sentence"},
         "controlled_when_you_create_space": {"pause_ownership_moment", "most_composed_moment", "strongest_moment", "rushing_moment"},
-        "clear_when_framed_first": {"strong_opening", "best_sentence", "weak_closing"},
-        "convincing_when_you_anchor_attention": {"most_persuasive_moment", "high_presence_moment", "best_sentence"},
+        "clear_when_framed_first": {"strong_opening", "best_sentence", "strongest_moment", "weak_closing"},
+        "convincing_when_you_anchor_attention": {"most_persuasive_moment", "high_presence_moment", "best_sentence", "strongest_moment"},
     }
     return moment.type in type_groups.get(primary, set())
 
@@ -1689,6 +1727,10 @@ def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int, 
         if not _moment_supports_diagnosis(moment, diagnosis_model, evidence_ids):
             continue
         if moment.start_ms is None or moment.end_ms <= moment.start_ms or (moment.confidence is not None and 0 < moment.confidence < 0.35):
+            continue
+        if not (moment.headline or "").strip() or not (moment.summary or "").strip():
+            continue
+        if moment.type in {"generic", "timeline_evidence", "other"}:
             continue
         impact_values = list(moment.dimension_impact.values())
         confidence = moment.confidence or min(0.9, max(0.45, 0.62 + sum(abs(value) for value in impact_values[:3]) * 0.4))
@@ -1978,11 +2020,10 @@ def _technical_appendix(metrics: Metrics, scores: Scores, audio_quality: AudioQu
 
 def _share_card(scores: Scores, authority_type: ReportAuthorityType, mirror: ReportMirror, diagnosis: ReportDiagnosis) -> ReportShareCard:
     percentile_label = None
-    if scores.score_confidence is not None and scores.score_confidence >= 0.6 and scores.authority_percentile_estimate is not None:
+    if scores.score_confidence is not None and scores.score_confidence >= 0.8 and scores.score_rarity_label:
         percentile_label = scores.score_rarity_label
-        if not percentile_label:
-            percentile = int(round(scores.authority_percentile_estimate * 100))
-            percentile_label = f"Top {max(1, 100 - percentile)}% for vocal authority"
+    elif scores.score_confidence is not None and scores.score_confidence >= 0.6 and scores.score_rarity_label:
+        percentile_label = f"Directional: {scores.score_rarity_label}"
     return ReportShareCard(
         authority_score=scores.authority_score,
         authority_type=authority_type.label,
@@ -1993,6 +2034,190 @@ def _share_card(scores: Scores, authority_type: ReportAuthorityType, mirror: Rep
         share_safety="public_safe",
         hidden_private_findings=[],
     )
+
+
+def _voiced_speech_ms(metrics: Metrics) -> int:
+    return int(metrics.vad.total_speech_duration_ms or 0)
+
+
+def _is_insufficient_sample(metrics: Metrics, audio_quality: AudioQuality, duration_ms: int, confidence: float) -> bool:
+    voiced_ms = _voiced_speech_ms(metrics)
+    speech_ratio = _num(metrics.vad.speech_ratio)
+    return (
+        not audio_quality.usable
+        or (duration_ms > 0 and duration_ms < 8000)
+        or voiced_ms <= 750
+        or (duration_ms > 0 and speech_ratio < 0.03)
+        or confidence < 0.25
+    )
+
+
+def _insufficient_evidence_card(confidence: float, audio_quality: AudioQuality) -> ReportEvidenceCard:
+    warning = audio_quality.quality_warnings[0] if audio_quality.quality_warnings else "The recording did not contain enough usable speech for a full read."
+    return ReportEvidenceCard(
+        evidence_id="sample_quality_insufficient",
+        id="sample_quality",
+        trait="sample quality",
+        dimension="Sample quality",
+        direction="neutral",
+        signal="The recording does not contain enough usable speech for a full authority read.",
+        what_happened="There was too little reliable speech to separate delivery behaviour from recording quality.",
+        why_it_matters=f"Authority should only make listener-perception claims when the sample can support them. Fix: Record a clear 30 to 60 second answer in a quiet place.",
+        listener_interpretation="No reliable listener interpretation is made from this sample.",
+        related_dimension="Sample quality",
+        confidence=round(min(confidence, 0.35), 2),
+        source_metrics=[],
+    )
+
+
+def _insufficient_report(
+    *,
+    scores: Scores,
+    metrics: Metrics,
+    audio_quality: AudioQuality,
+    duration_ms: int,
+    scenario: str,
+    uncertainty: Uncertainty,
+    psychological_inference: PsychologicalInference,
+    diagnostic_reasoning: DiagnosticReasoning,
+    coaching_engine: CoachingEngine | None,
+    moment_intelligence: MomentIntelligence | None,
+) -> AuthorityReport:
+    evidence_card = _insufficient_evidence_card(scores.score_confidence or 0.0, audio_quality)
+    evidence_ids = [evidence_card.evidence_id]
+    authority_type = ReportAuthorityType(
+        type_id="insufficient_sample",
+        label="Insufficient Sample",
+        description="There is not enough usable speech to assign an authority type.",
+        top_dimensions=[],
+        growth_dimensions=[],
+        evidence_ids=evidence_ids,
+        confidence=round(min(scores.score_confidence or 0.0, 0.35), 2),
+    )
+    limited_text = "There is not enough usable speech for a trustworthy authority diagnosis. Record a clear 30 to 60 second answer and try again."
+    mirror = ReportMirror(
+        headline="There is not enough usable speech for a full authority read.",
+        identity_read=limited_text,
+        one_line_identity_read=limited_text,
+        core_tension="Insufficient sample quality",
+        emotional_tone="not enough reliable speech",
+        authority_type=authority_type.label,
+        confidence_label="low",
+        confidence_level="low",
+        evidence_ids=evidence_ids,
+    )
+    diagnosis = ReportDiagnosis(
+        strongest_dimension=None,
+        limiting_dimension=None,
+        primary_strength_dimension=None,
+        primary_limiting_dimension=None,
+        core_behavioural_pattern="Insufficient usable speech.",
+        core_pattern="Insufficient usable speech.",
+        social_consequence="No social consequence is inferred from this sample.",
+        supporting_evidence_ids=evidence_ids,
+        evidence_ids=evidence_ids,
+        severity="low",
+    )
+    perception = ReportPerceptionMap(
+        first_impression=ReportPerceptionRead(
+            label="Sample quality",
+            text="The recording is too limited for a reliable listener-perception read.",
+            evidence_ids=evidence_ids,
+            confidence=round(min(scores.score_confidence or 0.0, 0.35), 2),
+        )
+    )
+    hidden_cost = ReportHiddenCost(
+        dimension="Sample quality",
+        cost_id="insufficient_sample",
+        consequence="The hidden cost is measurement uncertainty: the system cannot tell whether the issue is delivery or the recording itself.",
+        evidence_ids=evidence_ids,
+        confidence=round(min(scores.score_confidence or 0.0, 0.35), 2),
+    )
+    fix = ReportHighestLeverageFix(
+        issue="Record a clearer sample",
+        plain_english="Record a clear 30 to 60 second answer before treating the report as diagnostic.",
+        why_this_matters="This matters because Authority should only describe listener perception when there is enough speech to support the read.",
+        expected_score_lift=None,
+        target_dimensions=[],
+        first_drill_id=None,
+        action_step="Record in a quiet place, speak for 30 to 60 seconds, and avoid stopping after only a few words.",
+        success_signal="The next upload should contain enough voiced speech for evidence, moments, and a diagnosis.",
+        duration_min=1,
+        selection_score=0.0,
+        evidence_ids=evidence_ids,
+    )
+    training = ReportTrainingPrescription(
+        drill_id=None,
+        title="Clear sample retest",
+        why_chosen="Chosen because the current recording is not strong enough to support a normal diagnosis.",
+        instructions=["Record a clear 30 to 60 second answer in a quiet place, then rerun the benchmark."],
+        target_metrics=[],
+        target_dimensions=[],
+        action_step=fix.action_step,
+        expected_score_lift=None,
+        duration_min=1,
+        success_signal=fix.success_signal,
+        evidence_ids=evidence_ids,
+    )
+    retest = ReportRetestPlan(
+        recommended_retest_after_days=1,
+        focus_metric="clearer sample quality",
+        compare_metrics=["usable speech", "recording clarity"],
+        same_prompt_recommended=True,
+        success_definition=fix.success_signal,
+        evidence_ids=evidence_ids,
+    )
+    appendix = _technical_appendix(metrics, scores, audio_quality, evidence_ids)
+    share_card = ReportShareCard(
+        authority_score=scores.authority_score,
+        authority_type=authority_type.label,
+        top_strength=None,
+        growth_area=None,
+        one_line_identity_read=mirror.one_line_identity_read,
+        percentile_label=None,
+        share_safety="public_safe",
+        hidden_private_findings=[],
+    )
+    reasons = list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons + ["Insufficient usable speech for full report"]))
+    if duration_ms and duration_ms < 25000:
+        reasons.append("Short recording limits full report confidence")
+    report_uncertainty = Uncertainty(
+        overall_confidence_label="low",
+        suppressed_traits=list(dict.fromkeys(psychological_inference.suppressed_traits + ["insufficient_sample"])),
+        reasons=list(dict.fromkeys(reasons)),
+    )
+    report = AuthorityReport(
+        mirror=mirror,
+        diagnosis=diagnosis,
+        perception_map=perception,
+        evidence_chain=[evidence_card],
+        timeline=[],
+        moment_intelligence=moment_intelligence or MomentIntelligence(moments=[]),
+        dimension_reports={},
+        hidden_cost=hidden_cost,
+        highest_leverage_fix=fix,
+        training_prescription=training,
+        retest_plan=retest,
+        authority_type=authority_type,
+        share_card=share_card,
+        technical_appendix=appendix,
+        scenario_summary=ReportScenarioSummary(
+            scenario_id=get_scenario_profile(scenario).scenario_id,
+            highest_leverage_fix=fix.issue,
+            coaching_explanation="A clearer recording is needed before selecting a behavioural drill.",
+        ),
+        diagnostic_reasoning=diagnostic_reasoning,
+        primary_diagnosis=None,
+        secondary_diagnosis=None,
+        contradictions=diagnostic_reasoning.contradictions,
+        hidden_cost_reasoning=diagnostic_reasoning.hidden_cost_reasoning,
+        dimension_reasoning={},
+        trait_reasoning=diagnostic_reasoning.trait_reasoning,
+        highest_leverage_reasoning=diagnostic_reasoning.highest_leverage_reasoning,
+        coaching_engine=coaching_engine,
+        uncertainty=report_uncertainty,
+    )
+    return report.model_copy(update={"validation": _validate_report(report, coaching_engine)})
 
 
 def _reconciled_diagnostic_reasoning(diagnostic: DiagnosticReasoning, diagnosis_model: BehaviourDiagnosis | None, evidence_ids: list[str]) -> DiagnosticReasoning:
@@ -2066,6 +2291,19 @@ def build_generated_report(
 ) -> AuthorityReport:
     profile = get_scenario_profile(scenario)
     confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
+    if _is_insufficient_sample(metrics, audio_quality, duration_ms, confidence):
+        return _insufficient_report(
+            scores=scores,
+            metrics=metrics,
+            audio_quality=audio_quality,
+            duration_ms=duration_ms,
+            scenario=scenario,
+            uncertainty=uncertainty,
+            psychological_inference=psychological_inference,
+            diagnostic_reasoning=diagnostic_reasoning,
+            coaching_engine=coaching_engine,
+            moment_intelligence=moment_intelligence,
+        )
     confidence_label = _confidence_label(confidence)
     observations = _behaviour_observations(
         evidence,
@@ -2090,6 +2328,12 @@ def build_generated_report(
     limiter = DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
     authority_type = _authority_type(scores, evidence_ids, confidence)
     diagnosis_confidence = min(confidence, diagnosis_model.confidence if diagnosis_model else confidence)
+    visible_contradictions = [
+        card for card in evidence_cards
+        if diagnosis_model and card.direction == "negative" and card.evidence_id not in diagnosis_model.evidence_ids
+    ]
+    if visible_contradictions:
+        diagnosis_confidence = min(0.79, max(0.35, diagnosis_confidence - min(0.18, len(visible_contradictions) * 0.08)))
     confidence_label = _confidence_label(diagnosis_confidence)
     mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids, evidence_cards, diagnosis_model)
     diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids, evidence_cards, diagnosis_model)
@@ -2129,6 +2373,8 @@ def build_generated_report(
     )
     if diagnosis_model and diagnosis_model.uncertainty_note:
         report_uncertainty.reasons.append("Multiple behavioural reads remain plausible; report confidence was reduced accordingly")
+    if visible_contradictions:
+        report_uncertainty.reasons.append("Competing behavioural signals lowered report confidence")
     if duration_ms and duration_ms < 25000:
         report_uncertainty.reasons.append("Short recording limits full report confidence")
     report = AuthorityReport(

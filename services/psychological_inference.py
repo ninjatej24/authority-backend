@@ -637,9 +637,9 @@ def build_psychological_inference(
     evidence_by_signal, active_signals = _evaluate_signals(values)
     uncertainty_factor, reasons = _uncertainty_factor(active_signals, audio_quality, duration_ms)
     evidence_by_id = {
-        evidence.evidence_id: evidence
-        for evidence in evidence_by_signal.values()
-        if evidence.observed_value is not None
+        evidence_by_signal[signal_id].evidence_id: evidence_by_signal[signal_id]
+        for signal_id in active_signals
+        if signal_id in evidence_by_signal and evidence_by_signal[signal_id].observed_value is not None
     }
 
     behaviours = _build_micro_behaviours(
