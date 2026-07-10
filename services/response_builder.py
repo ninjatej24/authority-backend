@@ -142,6 +142,30 @@ def _score_confidence_adjustment(
     return round(max(0.25, min(0.95, confidence)), 2)
 
 
+def _acoustic_hesitation_count(vad_result, rhythm_result, windows) -> tuple[int, float]:
+    """Estimate non-lexical hesitation without treating ordinary pauses as fillers."""
+    mid_micro_pauses = 0
+    if vad_result:
+        mid_micro_pauses = sum(1 for pause in vad_result.mid_sentence_pauses_ms if 200 <= pause <= 900)
+    rhythm_windows = getattr(rhythm_result, "hesitation_windows", 0) if rhythm_result else 0
+    acoustic_windows = sum(
+        1
+        for window in windows or []
+        if getattr(window, "hesitation_cluster", False) and getattr(window, "filler_rate", 0.0) < 0.08
+    )
+    count = max(mid_micro_pauses, rhythm_windows or 0, acoustic_windows)
+    confidence = 0.0
+    if count:
+        confidence = 0.52
+        if vad_result and vad_result.vad_backend not in {"none", "missing", "empty_fallback"}:
+            confidence += 0.18
+        if rhythm_result:
+            confidence += 0.12
+        if acoustic_windows:
+            confidence += 0.1
+    return count, round(min(confidence, 0.86), 2)
+
+
 def _load_audio_samples(wav_path: str) -> tuple[np.ndarray, int]:
     sound = parselmouth.Sound(wav_path)
     samples = sound.values[0] if sound.values.ndim > 1 else sound.values
@@ -447,15 +471,17 @@ def run_analysis(
         "words_per_minute": delivery.words_per_minute,
         "filler_density": delivery.filler_density,
     }
+    acoustic_hesitations, disfluency_confidence = _acoustic_hesitation_count(vad_result, rhythm_result, acoustic.windows)
 
-    # Refresh derived metrics with transcript-aware filler density.
+    # Refresh derived metrics with transcript-aware fillers and audio hesitation separated.
     acoustic.derived = acoustic.derived.model_copy(
         update={
             "hesitation_cluster_score": round(
                 min(
                     1.0,
                     voice_metrics.get("pause_frequency", 0) * 1.5
-                    + delivery.filler_density * 8,
+                    + (acoustic_hesitations / max(len(acoustic.windows), 1)) * 0.8
+                    + delivery.filler_density * 3,
                 ),
                 2,
             )
@@ -572,6 +598,8 @@ def run_analysis(
         transcription.transcript.words,
         asr_confidence=transcription.transcript.overall_asr_confidence,
         cognitive=cognitive,
+        acoustic_hesitations=acoustic_hesitations,
+        disfluency_confidence=disfluency_confidence,
     )
     linguistic_dict = linguistic.model_dump()
 

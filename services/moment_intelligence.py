@@ -183,6 +183,28 @@ def _transcript_span(words: list[TranscriptWord], start_ms: int, end_ms: int) ->
     return text or None, [f"w{index}" for index, _ in selected]
 
 
+def _timestamp_source(words: list[TranscriptWord], start_ms: int, end_ms: int) -> str:
+    selected = [word.timestamp_source for _, word in _words_in_window(words, start_ms, end_ms)]
+    if not selected:
+        return "estimated"
+    if all(source == "real" for source in selected):
+        return "real"
+    if any(source == "interpolated" for source in selected):
+        return "interpolated"
+    if any(source == "estimated" for source in selected):
+        return "estimated"
+    return "segment"
+
+
+def _timestamp_confidence_cap(source: str) -> float:
+    return {
+        "real": 0.94,
+        "segment": 0.74,
+        "interpolated": 0.54,
+        "estimated": 0.44,
+    }.get(source, 0.44)
+
+
 def _scenario_relevance(moment_type: str, scenario: str) -> float:
     profile = get_scenario_profile(scenario)
     priorities = " ".join(profile.coaching_priorities + profile.report_emphasis).lower()
@@ -383,6 +405,8 @@ def _candidate_to_moment(
     dims = {dimension: round(value, 2) for dimension, value in candidate.dimensions.items()}
     evidence_ids = _evidence_for_dimensions(evidence, dims)
     transcript, word_ids = _transcript_span(words, candidate.window.start_ms, candidate.window.end_ms)
+    timestamp_source = _timestamp_source(words, candidate.window.start_ms, candidate.window.end_ms)
+    confidence = min(candidate.confidence * quality_weight, _timestamp_confidence_cap(timestamp_source))
     scenario_relevance = _scenario_relevance(candidate.moment_type, scenario)
     training_value = 0.9 if candidate.moment_type in NEGATIVE_TYPES else 0.65
     importance = round(
@@ -405,7 +429,8 @@ def _candidate_to_moment(
         summary=candidate.summary,
         listener_interpretation=candidate.listener_interpretation,
         why_it_matters=candidate.why_it_matters,
-        confidence=round(candidate.confidence * quality_weight, 2),
+        timestamp_source=timestamp_source,  # type: ignore[arg-type]
+        confidence=round(confidence, 2),
         supporting_metrics=list(TYPE_METRICS.get(candidate.moment_type, ())),
         supporting_evidence_ids=evidence_ids,
         supporting_dimension_scores=dims,
@@ -420,11 +445,65 @@ def _candidate_to_moment(
     )
 
 
+def _overlap_ratio(a: Moment, b: Moment) -> float:
+    start = max(a.start_ms, b.start_ms)
+    end = min(a.end_ms, b.end_ms)
+    overlap = max(0, end - start)
+    shortest = max(1, min(a.end_ms - a.start_ms, b.end_ms - b.start_ms))
+    return overlap / shortest
+
+
+def _curated_role(moment: Moment) -> str:
+    if moment.type in {"strongest_moment", "high_presence_moment", "most_commanding_moment", "most_composed_moment", "most_persuasive_moment", "strong_opening", "strong_closing", "best_sentence", "pause_ownership_moment"}:
+        return "strongest"
+    if moment.type in {"weakest_moment", "confidence_drop", "rushing_moment", "filler_cluster", "hesitation_cluster", "monotone_stretch", "weak_opening", "weak_closing", "most_costly_sentence", "most_unstable_section"}:
+        return "cost"
+    return "opportunity"
+
+
+def _merge_duplicate_copy(primary: Moment, duplicate: Moment) -> Moment:
+    evidence = _dedupe(primary.supporting_evidence_ids + duplicate.supporting_evidence_ids)
+    metrics = _dedupe(primary.supporting_metrics + duplicate.supporting_metrics)
+    impact = dict(primary.dimension_impact)
+    for key, value in duplicate.dimension_impact.items():
+        if key not in impact or abs(value) > abs(impact[key]):
+            impact[key] = value
+    return primary.model_copy(
+        update={
+            "supporting_evidence_ids": evidence[:4],
+            "supporting_metrics": metrics,
+            "dimension_impact": impact,
+            "supporting_dimension_scores": impact,
+            "importance_score": round(max(primary.importance_score, duplicate.importance_score), 2),
+            "confidence": round(max(primary.confidence, duplicate.confidence), 2),
+        }
+    )
+
+
 def _prioritise(moments: list[Moment]) -> tuple[list[Moment], list[str], str | None, list[str]]:
     ordered = sorted(moments, key=lambda item: (item.importance_score, -item.priority, item.confidence), reverse=True)
-    top_ids = [item.moment_id for item in ordered[:8]]
+    curated: list[Moment] = []
+    roles: set[str] = set()
+    suppressed_ids: list[str] = []
+    for moment in ordered:
+        role = _curated_role(moment)
+        duplicate_index = next((i for i, existing in enumerate(curated) if _overlap_ratio(moment, existing) >= 0.55), None)
+        if duplicate_index is not None:
+            curated[duplicate_index] = _merge_duplicate_copy(curated[duplicate_index], moment)
+            suppressed_ids.append(moment.moment_id)
+            continue
+        if role in roles:
+            suppressed_ids.append(moment.moment_id)
+            continue
+        if len(curated) >= 4:
+            suppressed_ids.append(moment.moment_id)
+            continue
+        curated.append(moment)
+        roles.add(role)
+    ordered = curated
+    top_ids = [item.moment_id for item in ordered]
     free = next((item.moment_id for item in ordered if item.type in POSITIVE_TYPES), ordered[0].moment_id if ordered else None)
-    hidden = [item.moment_id for item in ordered[8:]]
+    hidden = suppressed_ids
     free_set = {free} if free else set()
     result = [
         item.model_copy(update={"preview_visible_free": item.moment_id in free_set})

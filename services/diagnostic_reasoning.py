@@ -303,6 +303,26 @@ def _rule_score(rule: DiagnosisRule, dims: dict[str, int], traits: dict[str, Psy
     return confidence, supporting, contradicting
 
 
+def _timestamp_quality(moments: list[Moment]) -> float:
+    if not moments:
+        return 0.55
+    weights = {"real": 1.0, "segment": 0.82, "interpolated": 0.52, "estimated": 0.38}
+    return sum(weights.get(getattr(moment, "timestamp_source", "estimated"), 0.38) for moment in moments) / len(moments)
+
+
+def _evidence_independence(evidence_ids: list[str], traits: dict[str, PsychologicalTrait]) -> int:
+    families: set[str] = set()
+    families.update(evidence_id.removeprefix("psi_ev_").split("_", 1)[0] for evidence_id in evidence_ids)
+    for trait in traits.values():
+        if set(trait.supporting_evidence_ids).intersection(evidence_ids):
+            for metric in trait.supporting_metrics:
+                parts = metric.split(".", 1)
+                families.add(parts[1].split("_", 1)[0] if len(parts) > 1 else parts[0])
+            for behaviour in trait.supporting_behaviours:
+                families.add(behaviour.split("_", 1)[0])
+    return len(families)
+
+
 def _diagnosis_from_rule(
     rule: DiagnosisRule,
     confidence: float,
@@ -340,16 +360,30 @@ def _select_diagnoses(
 ) -> tuple[DiagnosticDiagnosis | None, DiagnosticDiagnosis | None, list[DiagnosticDiagnosis]]:
     dims = _dimension_scores(scores)
     traits = _visible_traits(inference)
-    threshold = 0.58
-    if not audio_quality.usable or (duration_ms and duration_ms < 25000):
-        threshold = 0.68
+    threshold = 0.62
+    if not audio_quality.usable:
+        threshold += 0.1
+    if duration_ms and duration_ms < 45000:
+        threshold += 0.08
+    if duration_ms and duration_ms < 25000:
+        threshold += 0.12
+    ts_quality = _timestamp_quality(moments)
+    if ts_quality < 0.7:
+        threshold += 0.04
 
     candidates: list[DiagnosticDiagnosis] = []
     suppressed: list[DiagnosticDiagnosis] = []
     for rule in DIAGNOSES:
         confidence, supporting, contradicting = _rule_score(rule, dims, traits)
+        support_traits = [traits[trait_id] for trait_id in supporting if trait_id in traits]
+        evidence_ids = _trait_evidence_ids(support_traits)
+        independent_sources = _evidence_independence(evidence_ids, traits)
+        confidence *= 0.92 if duration_ms < 45000 else 1.0
+        confidence *= 0.82 if not audio_quality.usable else 1.0
+        confidence *= 0.95 if ts_quality < 0.7 else 1.0
+        confidence *= 0.8 if independent_sources < 2 else 1.0
         diagnosis = _diagnosis_from_rule(rule, confidence, supporting, contradicting, traits, evidence, moments, dims)
-        if confidence >= threshold and diagnosis.supporting_evidence_ids:
+        if confidence >= threshold and diagnosis.supporting_evidence_ids and independent_sources >= 2:
             candidates.append(diagnosis)
         else:
             suppressed.append(diagnosis)

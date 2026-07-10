@@ -16,6 +16,7 @@ ASR_MODEL = "whisper-1"
 class TranscriptionResult:
     transcript: Transcript
     approximate_timestamps: bool = False
+    timestamp_source: str = "estimated"
     raw_response: object | None = None
 
 
@@ -29,32 +30,53 @@ def _read_field(obj, name: str, default=None):
     return getattr(obj, name, default)
 
 
-def _words_from_segments(segments: list, *, approximate: bool) -> tuple[list[TranscriptWord], bool]:
+def _coerce_word(word, *, source: str) -> TranscriptWord | None:
+    text = str(_read_field(word, "word", _read_field(word, "text", ""))).strip()
+    if not text:
+        return None
+    start_raw = _read_field(word, "start", _read_field(word, "start_ms", 0))
+    end_raw = _read_field(word, "end", _read_field(word, "end_ms", start_raw))
+    start = float(start_raw)
+    end = float(end_raw)
+    if start > 1000 or end > 1000:
+        start_ms = int(start)
+        end_ms = int(end)
+    else:
+        start_ms = _ms(start)
+        end_ms = _ms(end)
+    confidence = _read_field(word, "confidence", None)
+    return TranscriptWord(
+        text=text,
+        start_ms=max(start_ms, 0),
+        end_ms=max(end_ms, start_ms),
+        confidence=float(confidence) if confidence is not None else None,
+        is_filler=is_filler_token(text),
+        timestamp_source=source,  # type: ignore[arg-type]
+    )
+
+
+def _response_words(response: object) -> list[TranscriptWord]:
+    raw_words = _read_field(response, "words", []) or []
+    words = [_coerce_word(word, source="real") for word in raw_words]
+    return [word for word in words if word is not None]
+
+
+def _words_from_segments(segments: list, *, approximate: bool) -> tuple[list[TranscriptWord], bool, str]:
     words: list[TranscriptWord] = []
     used_interpolation = approximate
+    timestamp_source = "segment"
 
     for segment in segments:
         segment_words = _read_field(segment, "words", []) or []
         if segment_words:
             for word in segment_words:
-                text = str(_read_field(word, "word", "")).strip()
-                if not text:
-                    continue
-                start = float(_read_field(word, "start", 0))
-                end = float(_read_field(word, "end", start))
-                confidence = _read_field(word, "confidence", None)
-                words.append(
-                    TranscriptWord(
-                        text=text,
-                        start_ms=_ms(start),
-                        end_ms=_ms(end),
-                        confidence=float(confidence) if confidence is not None else None,
-                        is_filler=is_filler_token(text),
-                    )
-                )
+                coerced = _coerce_word(word, source="segment")
+                if coerced:
+                    words.append(coerced)
             continue
 
         used_interpolation = True
+        timestamp_source = "interpolated"
         text = str(_read_field(segment, "text", "")).strip()
         start = float(_read_field(segment, "start", 0))
         end = float(_read_field(segment, "end", start))
@@ -74,10 +96,13 @@ def _words_from_segments(segments: list, *, approximate: bool) -> tuple[list[Tra
                     end_ms=_ms(word_end),
                     confidence=None,
                     is_filler=is_filler_token(token),
+                    timestamp_source="interpolated",
                 )
             )
 
-    return words, used_interpolation
+    if words and all(word.timestamp_source == "real" for word in words):
+        timestamp_source = "real"
+    return words, used_interpolation, timestamp_source
 
 
 def _build_segments(
@@ -104,6 +129,7 @@ def _build_segments(
                         end_ms=word.start_ms,
                         text=" ".join(current_tokens),
                         role="opening",
+                        timestamp_source=_segment_source(words, current_start, word.start_ms),
                     )
                 )
             current_role = "body"
@@ -119,6 +145,7 @@ def _build_segments(
                         end_ms=word.start_ms,
                         text=" ".join(current_tokens),
                         role="body",
+                        timestamp_source=_segment_source(words, current_start, word.start_ms),
                     )
                 )
             current_role = "closing"
@@ -135,6 +162,7 @@ def _build_segments(
                 end_ms=words[-1].end_ms,
                 text=" ".join(current_tokens),
                 role=current_role,  # type: ignore[arg-type]
+                timestamp_source=_segment_source(words, current_start, words[-1].end_ms),
             )
         )
 
@@ -146,10 +174,24 @@ def _build_segments(
                 end_ms=words[-1].end_ms,
                 text=full_text.strip(),
                 role="other",
+                timestamp_source=_segment_source(words, words[0].start_ms, words[-1].end_ms),
             )
         )
 
     return segments
+
+
+def _segment_source(words: list[TranscriptWord], start_ms: int, end_ms: int) -> str:
+    selected = [word.timestamp_source for word in words if word.end_ms >= start_ms and word.start_ms <= end_ms]
+    if not selected:
+        return "estimated"
+    if all(source == "real" for source in selected):
+        return "real"
+    if any(source == "interpolated" for source in selected):
+        return "interpolated"
+    if any(source == "estimated" for source in selected):
+        return "estimated"
+    return "segment"
 
 
 def _average_confidence(words: list[TranscriptWord]) -> float | None:
@@ -186,12 +228,16 @@ def transcribe_audio(
                 response_format="verbose_json",
             )
 
-    full_text = getattr(response, "text", None) or ""
-    segments_raw = getattr(response, "segments", None) or []
-    words, approximate_timestamps = _words_from_segments(segments_raw, approximate=False)
+    full_text = _read_field(response, "text", "") or ""
+    segments_raw = _read_field(response, "segments", None) or []
+    words = _response_words(response)
+    timestamp_source = "real" if words else "estimated"
+    if not words:
+        words, approximate_timestamps, timestamp_source = _words_from_segments(segments_raw, approximate=False)
 
     if not words and full_text.strip():
         approximate_timestamps = True
+        timestamp_source = "estimated"
         tokens = full_text.split()
         step_ms = max(duration_ms // max(len(tokens), 1), 1)
         words = [
@@ -201,6 +247,7 @@ def transcribe_audio(
                 end_ms=min((index + 1) * step_ms, duration_ms),
                 confidence=None,
                 is_filler=is_filler_token(token),
+                timestamp_source="estimated",
             )
             for index, token in enumerate(tokens)
         ]
@@ -220,5 +267,6 @@ def transcribe_audio(
     return TranscriptionResult(
         transcript=transcript,
         approximate_timestamps=approximate_timestamps,
+        timestamp_source=timestamp_source,
         raw_response=response,
     )

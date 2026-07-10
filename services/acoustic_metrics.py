@@ -816,9 +816,6 @@ def _sliding_window_features(
         # Enhanced: voicing ratio
         voicing_ratio = len(voiced) / len(segment_f0) if len(segment_f0) > 0 else 0.0
         
-        # Enhanced: hesitation cluster detection
-        hesitation_cluster = filler_rate > 0.08 and pause_ms > 300
-        
         # Enhanced: articulation consistency (word duration variability)
         articulation_consistency = 0.5
         if len(window_words) > 2:
@@ -832,9 +829,21 @@ def _sliding_window_features(
         monotone = pitch_stdev < 1.2 and loudness_stdev < 4
         rushing = wpm > 175
 
-        command = _clamp01(0.7 - filler_rate * 2 - (0.15 if rushing else 0))
-        clarity = _clamp01(0.75 - filler_rate * 2.5)
-        composure = _clamp01(0.8 - pause_ms / 1200 - filler_rate)
+        # Enhanced: hesitation cluster detection. This is deliberately separate
+        # from lexical fillers: it captures clustered timing disruption, not
+        # every pause and not every silence.
+        lexical_disruption = filler_rate > 0.08 and pause_ms > 250
+        acoustic_search = (
+            250 <= pause_ms <= 1300
+            and word_count >= 2
+            and (voicing_ratio < 0.72 or articulation_consistency < 0.62 or rushing)
+        )
+        hesitation_cluster = lexical_disruption or acoustic_search
+
+        hesitation_penalty = 0.08 if acoustic_search else 0.0
+        command = _clamp01(0.7 - filler_rate * 2 - (0.15 if rushing else 0) - hesitation_penalty)
+        clarity = _clamp01(0.75 - filler_rate * 2.5 - hesitation_penalty * 0.5)
+        composure = _clamp01(0.8 - pause_ms / 1200 - filler_rate - hesitation_penalty)
         presence = _clamp01((pitch_stdev / 4 + loudness_stdev / 20) / 2)
 
         windows.append(

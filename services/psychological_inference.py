@@ -97,6 +97,10 @@ def _metric_values(
         "raw_acoustic.projection_segments": raw.projection_segments,
         "raw_acoustic.energy_cv": raw.energy_cv,
         "linguistic.filler_words_per_min": linguistic.filler_words_per_min,
+        "linguistic.lexical_fillers": linguistic.lexical_fillers,
+        "linguistic.acoustic_hesitations": linguistic.acoustic_hesitations,
+        "linguistic.confirmed_disfluencies": linguistic.confirmed_disfluencies,
+        "linguistic.disfluency_confidence": linguistic.disfluency_confidence,
         "linguistic.hedges_per_100_words": linguistic.hedges_per_100_words,
         "linguistic.certainty_markers_per_100_words": linguistic.certainty_markers_per_100_words,
         "linguistic.self_doubt_markers": linguistic.self_doubt_markers,
@@ -140,6 +144,7 @@ def _signals() -> list[SignalRule]:
         SignalRule("high_fillers", "linguistic.filler_words_per_min", "<= 3 preferred; >= 8 disruptive", "supporting", 0.9, "High filler load makes speech sound less fluent and can weaken perceived control.", lambda v: _num(v) >= 8),
         SignalRule("very_high_fillers", "linguistic.filler_words_per_min", "< 8", "supporting", 1.0, "Very high filler load is a stronger disfluency signal than occasional conversational fillers.", lambda v: _num(v) >= 12),
         SignalRule("low_fillers", "linguistic.filler_words_per_min", "<= 3", "supporting", 0.75, "Low filler load supports impressions of verbal control.", lambda v: v is not None and _num(v) <= 3),
+        SignalRule("acoustic_hesitations", "linguistic.acoustic_hesitations", "0", "supporting", 0.35, "Audio timing suggests searching even when the transcript does not preserve filled pauses.", lambda v: _num(v) >= 1),
         SignalRule("pace_fast", "raw_acoustic.words_per_minute", "115-165 typical controlled range", "supporting", 0.75, "Fast pace can read as urgency or pressure when paired with disruption.", lambda v: _num(v) >= 175),
         SignalRule("pace_controlled", "raw_acoustic.words_per_minute", "115-165", "supporting", 0.65, "Controlled pace makes the listener work less and supports composure.", lambda v: 115 <= _num(v) <= 165),
         SignalRule("pace_slow", "raw_acoustic.words_per_minute", ">= 95", "supporting", 0.5, "Very slow pace can reduce energy unless balanced by strong structure.", lambda v: 0 < _num(v) <= 95),
@@ -204,7 +209,7 @@ def _num(value: float | int | str | bool | None) -> float:
 
 def _behaviours() -> list[BehaviourRule]:
     return [
-        BehaviourRule("searching_for_wording", "Searching for wording under pressure", ("high_fillers", "pace_acceleration", "hesitation_high"), ("low_fillers", "stable_rhythm")),
+        BehaviourRule("searching_for_wording", "Searching for wording under pressure", ("high_fillers", "acoustic_hesitations", "hesitation_high", "pace_acceleration"), ("low_fillers", "stable_rhythm")),
         BehaviourRule("comfort_holding_floor", "Comfort holding the conversational floor", ("stable_rhythm", "owned_pauses", "low_fillers"), ("pace_fast", "hesitation_high")),
         BehaviourRule("speaking_with_conviction", "Speaking with conviction", ("falling_endings", "dynamic_emphasis_high", "certainty_high"), ("rising_endings", "hedges_high")),
         BehaviourRule("reluctance_to_commit", "Reluctance to commit strongly", ("closing_weak", "hedges_high", "rising_endings"), ("certainty_high", "falling_endings")),

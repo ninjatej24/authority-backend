@@ -10,6 +10,8 @@ from schemas import (
     CoachingEngine,
     DiagnosticReasoning,
     DiagnosticDiagnosis,
+    HiddenCostReasoning,
+    HighestLeverageReasoning,
     EvidenceItem,
     Metrics,
     Moment,
@@ -273,6 +275,19 @@ def _clean_report_text(text: str) -> str:
     for prefix in ("raw_acoustic.", "linguistic.", "derived.", "rhythm.", "vad.", "articulation."):
         cleaned = cleaned.replace(prefix, "")
     cleaned = cleaned.replace("behaviour:", "")
+    replacements = {
+        "supported by": "visible in",
+        "contradicted by": "complicated by",
+        "evidence items": "signs",
+        "deterministic": "rule-based",
+        "backend": "analysis",
+        "metric": "signal",
+        "hypothesis": "read",
+        "observed as": "heard as",
+        "winning diagnosis": "main read",
+    }
+    for marker, replacement in replacements.items():
+        cleaned = cleaned.replace(marker, replacement).replace(marker.title(), replacement.title())
     return cleaned.replace("_", " ")
 
 
@@ -747,7 +762,7 @@ def _mirror(scores: Scores, authority_type: ReportAuthorityType, strongest: str,
         tension = diagnosis_model.one_sentence_pattern
     elif positive and negative:
         identity = f"Listeners are likely to trust the moments where {pos_behaviour}, while {neg_observation} makes the message feel less fully led."
-        tension = f"{positive.related_dimension} supported by behaviour; {negative.related_dimension} limited by behaviour"
+        tension = f"{positive.related_dimension} shows control; {negative.related_dimension} is the limiting behaviour"
     else:
         identity = f"Listeners are likely to notice your {strongest.lower()}, while {limiter.lower()} shapes the current growth edge."
         tension = f"{strongest} constrained by {limiter}"
@@ -878,7 +893,7 @@ def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityT
         emotional_text = f"The emotional read stays tied to the observable behaviour: {_lower_first(diagnosis_model.observed_behaviour)}"
         interview_text = f"In an interview, this would likely matter because {_lower_first(diagnosis_model.social_consequence)}"
         leadership_text = f"The leadership read follows from the same behaviour: {_lower_first(diagnosis_model.listener_interpretation)}"
-        persuasion_text = f"Persuasion improves by changing the behaviour directly: {_lower_first(diagnosis_model.fix_category)}"
+        persuasion_text = f"Persuasion improves by changing the behaviour directly: {_clean_report_text(_lower_first(diagnosis_model.fix_category))}"
     elif not negative:
         first_text = f"The first impression {phrase} that you are easiest to trust when {pos}. The report does not have a strong enough negative behaviour to make a sharper limiting claim."
         professional_text = f"Professionally, the clearest read is behavioural: {pos}."
@@ -902,7 +917,7 @@ def _perception_map(diagnosis: ReportDiagnosis, authority_type: ReportAuthorityT
         emotional_read=_read("Emotional read", emotional_text, evidence_ids, confidence),
         interview_read=_read("Interview read", interview_text, evidence_ids, confidence),
         leadership_read=_read("Leadership read", leadership_text, evidence_ids, confidence),
-        trust_read=_read("Trust read", f"Trust is supported by the observable control in this sample, especially when {pos}.", evidence_ids, confidence),
+        trust_read=_read("Trust read", f"Trust comes from the observable control in this sample, especially when {pos}.", evidence_ids, confidence),
         persuasion_read=_read("Persuasion read", persuasion_text, evidence_ids, confidence),
     )
 
@@ -1019,11 +1034,11 @@ def _evidence_templates() -> dict[str, EvidenceTemplate]:
             "Composure",
             "negative",
             "Hesitation clustering",
-            "Disruptions concentrated into clusters rather than staying isolated.",
-            "Clustered hesitation is more noticeable than the same amount spread across a recording.",
-            "The thought process may sound briefly overloaded, even when the content is useful.",
+            "The recording contains moments of vocal searching that are not necessarily visible in the transcript.",
+            "Listeners hear hesitation through timing and restart patterns, not only through written filler words.",
+            "Thoughtful, but occasionally pausing while searching for the next idea.",
             "Stop after the first disruption, breathe, and restart with the next complete clause.",
-            ("hesitation_high", "hesitation_windows"),
+            ("hesitation_high", "hesitation_windows", "acoustic_hesitations"),
             0.88,
         ),
         EvidenceTemplate(
@@ -1170,6 +1185,7 @@ def _signal_is_active(signal: PsychologicalEvidenceSignal) -> bool:
         "high_fillers": numeric >= 8,
         "very_high_fillers": numeric >= 12,
         "low_fillers": numeric <= 3,
+        "acoustic_hesitations": numeric >= 1,
         "pace_fast": numeric >= 175,
         "pace_controlled": 115 <= numeric <= 165,
         "pace_slow": 0 < numeric <= 95,
@@ -1221,6 +1237,8 @@ def _active_signal_map(psychological: PsychologicalInference) -> dict[str, Psych
     if "low_fillers" in active:
         active.pop("high_fillers", None)
         active.pop("very_high_fillers", None)
+    if "acoustic_hesitations" in active:
+        active.pop("low_fillers", None)
     if "hesitation_low" in active:
         active.pop("hesitation_high", None)
         active.pop("hesitation_windows", None)
@@ -1328,10 +1346,10 @@ def _observation_from_template(
         consequence = "That gives clarity more room to land because the listener does not have to filter around repairs."
         fix = "Protect this strength by pausing before difficult wording instead of filling the gap."
     elif template.id == "hesitation_clustering":
-        observed = f"Hesitations grouped together {place} instead of appearing as isolated pauses."
-        behaviour = "The disruption became locally concentrated, which makes it more noticeable."
-        listener = "Listeners may hear a temporary loss of command over the answer path."
-        consequence = "The cost is composure: the recording briefly sounds more pressured than the content requires."
+        observed = f"You occasionally paused while searching for your next idea {place}."
+        behaviour = "The hesitation was audible in timing and restart patterns, even where the transcript may not show a filler word."
+        listener = "Listeners may hear a brief search for the next point rather than a fully owned pause."
+        consequence = "The cost is composure: the recording can sound more pressured than the content requires."
         fix = "After the first disruption, stop, breathe, and restart with one clean clause."
     elif template.id == "pause_ownership":
         observed = f"A pause landed cleanly {place}, giving the previous idea space instead of breaking it."
@@ -1734,6 +1752,8 @@ def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int, 
             continue
         impact_values = list(moment.dimension_impact.values())
         confidence = moment.confidence or min(0.9, max(0.45, 0.62 + sum(abs(value) for value in impact_values[:3]) * 0.4))
+        if moment.timestamp_source in {"interpolated", "estimated"}:
+            confidence = min(confidence, 0.54 if moment.timestamp_source == "interpolated" else 0.44)
         if confidence < 0.4:
             continue
         moment_evidence = [item for item in moment.supporting_evidence_ids if item in evidence_ids] or evidence_ids[:3]
@@ -1751,6 +1771,7 @@ def _timeline(moments: list[Moment], evidence_ids: list[str], duration_ms: int, 
                 confidence=round(confidence, 2),
                 start_ms=moment.start_ms,
                 end_ms=moment.end_ms,
+                timestamp_source=moment.timestamp_source,
                 evidence_ids=moment_evidence,
                 supporting_metrics=[_plain_metric_label(metric) for metric in moment.supporting_metrics],
                 transcript_span=moment.transcript_span,
@@ -2238,7 +2259,39 @@ def _reconciled_diagnostic_reasoning(diagnostic: DiagnosticReasoning, diagnosis_
         supporting_moment_ids=moments,
         affected_dimensions=[diagnosis_model.primary_dimension, *diagnosis_model.secondary_dimensions],
     )
-    return diagnostic.model_copy(update={"primary_diagnosis": reconciled_primary})
+    hidden = diagnostic.hidden_cost_reasoning or HiddenCostReasoning(
+        cost_id=f"hidden_cost_{diagnosis_model.primary_dimension.lower()}",
+        source_signal=diagnosis_model.observed_behaviour,
+        interpretation=diagnosis_model.listener_interpretation,
+        consequence=diagnosis_model.social_consequence,
+        listener_effect=diagnosis_model.social_consequence,
+        affected_dimensions=[diagnosis_model.primary_dimension, *diagnosis_model.secondary_dimensions],
+        evidence_ids=supporting,
+        moment_ids=moments,
+        confidence=diagnosis_model.confidence,
+    )
+    leverage = diagnostic.highest_leverage_reasoning or HighestLeverageReasoning(
+        issue_id=diagnosis_model.fix_category,
+        plain_reason=diagnosis_model.fix_category,
+        affected_dimensions=[diagnosis_model.primary_dimension, *diagnosis_model.secondary_dimensions],
+        supporting_evidence=supporting,
+        expected_score_lift="medium",
+        recommended_first_drill=diagnosis_model.drill_id,
+        confidence=diagnosis_model.confidence,
+        severity=0.65,
+        authority_impact=0.75,
+        trainability=0.75,
+        evidence_confidence=diagnosis_model.confidence,
+        scenario_relevance=1.0,
+        selection_score=round(0.65 * 0.75 * 0.75 * diagnosis_model.confidence, 3),
+    )
+    return diagnostic.model_copy(
+        update={
+            "primary_diagnosis": reconciled_primary,
+            "hidden_cost_reasoning": hidden,
+            "highest_leverage_reasoning": leverage,
+        }
+    )
 
 
 def _validate_report(report: AuthorityReport, coaching: CoachingEngine | None) -> ReportValidation:

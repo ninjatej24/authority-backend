@@ -228,6 +228,8 @@ def build_linguistic_metrics(
     *,
     asr_confidence: float | None = None,
     cognitive: dict | None = None,
+    acoustic_hesitations: int | None = None,
+    disfluency_confidence: float | None = None,
 ) -> LinguisticMetrics:
     """Build authority.v2 linguistic metrics from deterministic transcript rules."""
     text_lower = text.lower()
@@ -235,6 +237,8 @@ def build_linguistic_metrics(
     duration_minutes = max(duration_seconds / 60, 1 / 60)
 
     filler_per_min = delivery.filler_count / duration_minutes
+    acoustic_count = max(acoustic_hesitations or 0, 0)
+    confirmed_disfluencies = delivery.filler_count + acoustic_count
     hedges = count_phrase_occurrences(text_lower, HEDGE_PHRASES)
     certainty = count_phrase_occurrences(text_lower, CERTAINTY_PHRASES)
 
@@ -255,6 +259,10 @@ def build_linguistic_metrics(
 
     return LinguisticMetrics(
         filler_words_per_min=round(filler_per_min, 1),
+        lexical_fillers=delivery.filler_count,
+        acoustic_hesitations=acoustic_count,
+        confirmed_disfluencies=confirmed_disfluencies,
+        disfluency_confidence=disfluency_confidence,
         hedges_per_100_words=_per_100_words(hedges, word_count),
         certainty_markers_per_100_words=_per_100_words(certainty, word_count),
         passive_voice_ratio=_passive_voice_ratio(text),

@@ -43,6 +43,7 @@ class TranscriptWord(BaseModel):
     end_ms: int
     confidence: float | None = None
     is_filler: bool = False
+    timestamp_source: Literal["real", "segment", "interpolated", "estimated"] = "real"
 
 
 class TranscriptSegment(BaseModel):
@@ -51,6 +52,7 @@ class TranscriptSegment(BaseModel):
     end_ms: int
     text: str
     role: Literal["opening", "body", "closing", "other"] = "other"
+    timestamp_source: Literal["real", "segment", "interpolated", "estimated"] = "real"
 
 
 class Transcript(BaseModel):
@@ -233,6 +235,10 @@ class RawAcousticMetrics(BaseModel):
 
 class LinguisticMetrics(BaseModel):
     filler_words_per_min: float | None = None
+    lexical_fillers: int | None = None
+    acoustic_hesitations: int | None = None
+    confirmed_disfluencies: int | None = None
+    disfluency_confidence: float | None = None
     hedges_per_100_words: float | None = None
     certainty_markers_per_100_words: float | None = None
     passive_voice_ratio: float | None = None
@@ -455,6 +461,7 @@ class Moment(BaseModel):
     priority: int = 0
     start_ms: int
     end_ms: int
+    timestamp_source: Literal["real", "segment", "interpolated", "estimated"] = "estimated"
     severity: Literal["highlight", "low", "medium", "high"]
     headline: str
     summary: str
@@ -878,6 +885,7 @@ class ReportTimelineItem(BaseModel):
     confidence: float
     start_ms: int
     end_ms: int
+    timestamp_source: Literal["real", "segment", "interpolated", "estimated"] = "estimated"
     evidence_ids: list[str] = Field(default_factory=list)
     supporting_metrics: list[str] = Field(default_factory=list)
     transcript_span: str | None = None
