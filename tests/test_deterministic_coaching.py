@@ -8,7 +8,7 @@ from services.response_builder import _deterministic_drills, _deterministic_reco
 from services.report_builder import apply_coaching_to_report, build_report
 from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
 from tests.test_psychological_inference import _infer, _metrics, _scores
-from tests.test_report_builder import _evidence, _moments
+from tests.test_report_builder import _evidence, _moments, _test_transcript
 
 
 def _coaching(**kwargs):
@@ -187,6 +187,7 @@ def test_report_uses_deterministic_coaching_engine_for_drill_selection():
         audio_quality=audio_quality,
         duration_ms=60000,
         scenario="benchmark",
+        transcript=_test_transcript(duration_ms=60000),
     )
     coaching = _coaching(
         scores=scores,

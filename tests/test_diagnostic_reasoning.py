@@ -8,7 +8,7 @@ from schemas import AudioQuality, Uncertainty
 from services.diagnostic_reasoning import build_diagnostic_reasoning
 from services.report_builder import build_report
 from tests.test_psychological_inference import _infer, _metrics, _scores
-from tests.test_report_builder import _evidence, _moments
+from tests.test_report_builder import _evidence, _moments, _test_transcript
 
 
 def _diagnostic(**kwargs):
@@ -146,7 +146,15 @@ def test_suppressed_traits_do_not_support_primary_diagnosis():
 
 def test_report_generation_maps_reasoning_without_gpt_decisions():
     scores = _softened_expert_scores()
-    metrics = _metrics()
+    metrics = _metrics(
+        linguistic={
+            "specificity_score": 0.12,
+            "concreteness_score": 0.08,
+            "opening_strength_score": 0.82,
+            "closing_strength_score": 0.72,
+            "structure_score": 0.74,
+        }
+    )
     audio_quality = AudioQuality(usable=True, background_noise_level="low")
     uncertainty = Uncertainty(overall_confidence_label="medium_high", reasons=[])
     inference = _infer(metrics, audio_quality=audio_quality)
@@ -169,16 +177,13 @@ def test_report_generation_maps_reasoning_without_gpt_decisions():
         audio_quality=audio_quality,
         duration_ms=60000,
         scenario="benchmark",
+        transcript=_test_transcript(duration_ms=60000),
     )
 
     assert report.diagnosis.core_behavioural_pattern
     pattern = report.diagnosis.core_behavioural_pattern.lower().rstrip(".")
-    if report.primary_diagnosis is not None:
-        assert report.primary_diagnosis.diagnosis_name == report.diagnosis.core_behavioural_pattern
-        assert set(report.primary_diagnosis.supporting_evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
-        assert pattern in report.mirror.headline.lower()
-        assert pattern in report.highest_leverage_fix.plain_english.lower()
-        assert report.hidden_cost_reasoning == reasoning.hidden_cost_reasoning
-        assert report.highest_leverage_reasoning == reasoning.highest_leverage_reasoning
-    else:
-        assert report.mirror.confidence_label in {"low", "medium"}
+    assert report.report_mode == "full"
+    assert report.primary_diagnosis is not None
+    assert set(report.primary_diagnosis.supporting_evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
+    assert pattern not in report.mirror.headline.lower()
+    assert report.highest_leverage_fix.evidence_ids

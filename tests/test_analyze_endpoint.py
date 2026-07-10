@@ -138,6 +138,8 @@ def test_analyze_returns_valid_authority_v2(
 
     model = AuthorityV2Response.model_validate(payload)
     assert model.schema_version == "authority.v2"
+    assert model.report_mode in {"full", "insufficient"}
+    assert model.report.report_mode == model.report_mode
     assert model.request.scenario == "benchmark"
     assert model.transcript.full_text
     assert 20 <= model.scores.authority_score <= 97
@@ -222,7 +224,7 @@ def test_analyze_returns_milestone3_metrics(
     mock_coaching_client.chat.completions.create.return_value = feedback_response
     mock_coaching_get_client.return_value = mock_coaching_client
 
-    wav_bytes = _make_wav_bytes(duration_seconds=10.0)  # Long enough to avoid insufficient-sample gating
+    wav_bytes = _make_wav_bytes(duration_seconds=10.0)
     response = client.post(
         "/analyze",
         files={"file": ("sample.wav", wav_bytes, "audio/wav")},
@@ -272,24 +274,32 @@ def test_analyze_returns_milestone3_metrics(
     assert payload["psychological_inference"]["evidence_chain"]
 
     report = payload["report"]
-    assert report["mirror"]["evidence_ids"]
-    assert report["diagnosis"]["supporting_evidence_ids"]
-    assert report["perception_map"]["first_impression"]["evidence_ids"]
-    if report["authority_type"]["label"] == "Insufficient Sample":
-        assert "30 to 60 second" in report["highest_leverage_fix"]["plain_english"]
-        assert report["training_prescription"]["instructions"]
+    assert payload["report_mode"] == report["report_mode"]
+    if report["report_mode"] == "insufficient":
+        assert report["insufficient_sample"]["retry_instruction"]
+        assert report["mirror"] is None
+        assert report["diagnosis"] is None
+        assert report["perception_map"] is None
+        assert report["hidden_cost"] is None
+        assert report["highest_leverage_fix"] is None
+        assert report["training_prescription"] is None
+        assert report["authority_type"] is None
+        assert report["share_card"] is None
     else:
+        assert report["mirror"]["evidence_ids"]
+        assert report["diagnosis"]["supporting_evidence_ids"]
+        assert report["perception_map"]["first_impression"]["evidence_ids"]
         assert report["highest_leverage_fix"]["first_drill_id"]
         assert report["training_prescription"]["drill_id"]
-    assert report["authority_type"]["label"]
-    assert report["share_card"]["share_safety"] == "public_safe"
+        assert report["authority_type"]["label"]
+        assert report["share_card"]["share_safety"] == "public_safe"
     assert report["technical_appendix"]["metrics"]
-    if report["authority_type"]["label"] == "Insufficient Sample":
-        assert report["primary_diagnosis"] is None
-    else:
+    if report["report_mode"] == "full":
         assert report["diagnostic_reasoning"]["dimension_reasoning"]
         assert report["primary_diagnosis"]["supporting_evidence_ids"]
         assert report["highest_leverage_reasoning"]["selection_score"] > 0
+    else:
+        assert report["primary_diagnosis"] is None
 
     coaching = payload["coaching_engine"]
     assert coaching["drill_library_size"] >= 20

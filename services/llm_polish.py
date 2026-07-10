@@ -381,6 +381,8 @@ def polish_authority_report(
     timeout_seconds: float = 8.0,
 ) -> PolishedAuthorityReport:
     """Polish deterministic wording without changing any conclusions."""
+    if report.report_mode == "insufficient":
+        return _fallback_report(report, progress, warning="Report insufficient for polish", status="fallback", model=model)
     if client is None:
         return _fallback_report(report, progress, warning="LLM polish unavailable", status="fallback", model=model)
     payload = _prompt_payload(

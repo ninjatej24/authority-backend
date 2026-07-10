@@ -2,10 +2,42 @@
 
 from __future__ import annotations
 
-from schemas import AudioQuality, EvidenceItem, Moment, Uncertainty
+from schemas import AudioQuality, EvidenceItem, Moment, Transcript, TranscriptSegment, TranscriptWord, Uncertainty
+from services.deterministic_coaching import build_deterministic_coaching
 from services.diagnostic_reasoning import build_diagnostic_reasoning
 from services.report_builder import build_report
 from tests.test_psychological_inference import _infer, _metrics, _scores
+
+
+def _test_transcript(
+    text: str = "The main reason communication matters is that communicating my ideas better would help my future and create more opportunities.",
+    *,
+    confidence: float = 0.94,
+    duration_ms: int = 60000,
+) -> Transcript:
+    tokens = text.split()
+    step = max(duration_ms // max(len(tokens), 1), 1)
+    words = [
+        TranscriptWord(
+            text=token,
+            start_ms=index * step,
+            end_ms=min((index + 1) * step, duration_ms),
+            confidence=confidence,
+            timestamp_source="real",
+        )
+        for index, token in enumerate(tokens)
+    ]
+    cut = max(1, len(words) // 3)
+    return Transcript(
+        full_text=text,
+        speaker_language_confidence=confidence,
+        overall_asr_confidence=confidence,
+        words=words,
+        segments=[
+            TranscriptSegment(segment_id="seg_1", start_ms=words[0].start_ms, end_ms=words[cut - 1].end_ms, text=" ".join(tokens[:cut]), role="opening", timestamp_source="real"),
+            TranscriptSegment(segment_id="seg_2", start_ms=words[cut].start_ms, end_ms=words[-1].end_ms, text=" ".join(tokens[cut:]), role="body", timestamp_source="real"),
+        ],
+    )
 
 
 def _evidence() -> list[EvidenceItem]:
@@ -61,7 +93,18 @@ def _moments() -> list[Moment]:
 
 def _report(**kwargs):
     scores = kwargs.pop("scores", _scores())
-    metrics = kwargs.pop("metrics", _metrics())
+    metrics = kwargs.pop(
+        "metrics",
+        _metrics(
+            linguistic={
+                "specificity_score": 0.12,
+                "concreteness_score": 0.08,
+                "opening_strength_score": 0.82,
+                "closing_strength_score": 0.72,
+                "structure_score": 0.74,
+            }
+        ),
+    )
     audio_quality = kwargs.pop(
         "audio_quality",
         AudioQuality(usable=True, background_noise_level="low"),
@@ -75,6 +118,7 @@ def _report(**kwargs):
     moments = kwargs.pop("moments", _moments())
     duration_ms = kwargs.pop("duration_ms", 60000)
     scenario = kwargs.pop("scenario", "benchmark")
+    transcript = kwargs.pop("transcript", _test_transcript(duration_ms=duration_ms))
     diagnostic_reasoning = kwargs.pop(
         "diagnostic_reasoning",
         build_diagnostic_reasoning(
@@ -83,6 +127,20 @@ def _report(**kwargs):
             evidence=evidence,
             moments=moments,
             scores=scores,
+            audio_quality=audio_quality,
+            uncertainty=uncertainty,
+            duration_ms=duration_ms,
+            scenario=scenario,
+        ),
+    )
+    coaching = kwargs.pop(
+        "coaching_engine",
+        build_deterministic_coaching(
+            metrics=metrics,
+            scores=scores,
+            psychological_inference=inference,
+            diagnostic_reasoning=diagnostic_reasoning,
+            report=None,
             audio_quality=audio_quality,
             uncertainty=uncertainty,
             duration_ms=duration_ms,
@@ -100,6 +158,8 @@ def _report(**kwargs):
         audio_quality=audio_quality,
         duration_ms=duration_ms,
         scenario=scenario,
+        coaching_engine=coaching,
+        transcript=transcript,
     )
 
 
@@ -129,8 +189,8 @@ def test_report_builder_populates_all_major_sections_with_evidence_ids():
     assert report.perception_map.first_impression.evidence_ids
     if report.primary_diagnosis is not None:
         assert report.primary_diagnosis.supporting_evidence_ids
-        assert report.hidden_cost_reasoning.evidence_ids
-        assert report.highest_leverage_reasoning.supporting_evidence
+        assert report.hidden_cost.evidence_ids
+        assert report.highest_leverage_fix.evidence_ids
 
 
 def test_highest_leverage_fix_and_training_are_deterministic_from_limiter():
@@ -145,7 +205,7 @@ def test_highest_leverage_fix_and_training_are_deterministic_from_limiter():
 
     assert report.diagnosis.core_pattern
     if report.primary_diagnosis is not None:
-        assert report.primary_diagnosis.diagnosis_name == report.diagnosis.core_pattern
+        assert report.primary_diagnosis.diagnosis_id in {item.id for item in report.evidence_chain}
     assert report.highest_leverage_fix.first_drill_id
     assert report.highest_leverage_fix.evidence_ids
     assert set(report.highest_leverage_fix.evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
@@ -228,8 +288,10 @@ def test_poor_audio_propagates_uncertainty_without_fabricating_confidence():
     )
     report = _report(audio_quality=audio_quality, uncertainty=uncertainty, duration_ms=9000)
 
+    assert report.report_mode == "insufficient"
+    assert report.insufficient_sample
     assert report.uncertainty.reasons
     assert "Poor microphone signal" in report.uncertainty.reasons
-    assert "Short recording limits full report confidence" in report.uncertainty.reasons
+    assert "Recording duration was below the minimum for a complete Authority Report." in report.uncertainty.reasons
     assert report.technical_appendix.audio_quality_warnings == ["Very low signal level"]
-    assert report.share_card.share_safety == "public_safe"
+    assert report.share_card is None

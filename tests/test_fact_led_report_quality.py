@@ -256,24 +256,28 @@ def _major_sections(report):
 
 
 def _strings(report):
-    reads = [read["text"] for read in report.perception_map.model_dump().values() if read]
-    return [
-        report.mirror.headline,
-        report.mirror.identity_read,
-        report.diagnosis.core_pattern,
-        report.diagnosis.social_consequence,
+    reads = [read["text"] for read in report.perception_map.model_dump().values() if read] if report.perception_map else []
+    values = [
+        report.insufficient_sample.title if report.insufficient_sample else None,
+        report.insufficient_sample.explanation if report.insufficient_sample else None,
+        report.insufficient_sample.retry_instruction if report.insufficient_sample else None,
+        report.mirror.headline if report.mirror else None,
+        report.mirror.identity_read if report.mirror else None,
+        report.diagnosis.core_pattern if report.diagnosis else None,
+        report.diagnosis.social_consequence if report.diagnosis else None,
         *reads,
-        report.hidden_cost.consequence,
-        report.highest_leverage_fix.plain_english,
-        report.highest_leverage_fix.why_this_matters,
-        report.training_prescription.why_chosen,
-        report.training_prescription.success_signal,
-        *report.training_prescription.instructions,
+        report.hidden_cost.consequence if report.hidden_cost else None,
+        report.highest_leverage_fix.plain_english if report.highest_leverage_fix else None,
+        report.highest_leverage_fix.why_this_matters if report.highest_leverage_fix else None,
+        report.training_prescription.why_chosen if report.training_prescription else None,
+        report.training_prescription.success_signal if report.training_prescription else None,
+        *(report.training_prescription.instructions if report.training_prescription else []),
         *[item.signal for item in report.evidence_chain],
         *[item.what_happened for item in report.evidence_chain],
         *[item.why_it_matters for item in report.evidence_chain],
         *[item.headline for item in report.timeline],
     ]
+    return [value for value in values if value]
 
 
 def _norm(text: str | None) -> set[str]:
@@ -387,8 +391,10 @@ def test_weak_transcript_suppresses_transcript_specific_claims():
     report = _report("thin_proof", weak_transcript=True)
     text = " ".join(_strings(report)).lower()
 
+    assert report.report_mode == "insufficient"
     assert "communicating my ideas" not in text
-    assert any("transcript-specific wording was suppressed" in reason.lower() for reason in report.uncertainty.reasons)
+    assert report.diagnosis is None
+    assert report.perception_map is None
 
 
 def test_weak_timestamps_suppress_exact_proof_moments():

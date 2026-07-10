@@ -40,7 +40,18 @@ def _perception() -> PerceptionProfile:
 
 
 def _response(**kwargs) -> AuthorityV2Response:
-    metrics = kwargs.pop("metrics", _metrics())
+    metrics = kwargs.pop(
+        "metrics",
+        _metrics(
+            linguistic={
+                "specificity_score": 0.12,
+                "concreteness_score": 0.08,
+                "opening_strength_score": 0.82,
+                "closing_strength_score": 0.72,
+                "structure_score": 0.74,
+            }
+        ),
+    )
     scores = kwargs.pop("scores", _softened_expert_scores())
     audio_quality = kwargs.pop("audio_quality", AudioQuality(usable=True, background_noise_level="low"))
     uncertainty = kwargs.pop("uncertainty", Uncertainty(overall_confidence_label="medium_high", reasons=[]))

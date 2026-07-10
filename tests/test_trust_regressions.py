@@ -11,7 +11,7 @@ from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
 from tests.test_moment_intelligence import _windows
 from tests.test_psychological_inference import _infer, _metrics
 from tests.test_report_builder import _evidence
-from tests.test_report_generation import _generated_report, _report_user_facing_strings
+from tests.test_report_generation import _generated_report, _report_user_facing_strings, _test_transcript
 
 
 class _Obj:
@@ -150,11 +150,13 @@ def test_user_facing_copy_has_no_internal_language_or_raw_metrics():
 
 
 def test_report_suppresses_diagnosis_when_evidence_is_mostly_positive():
-    report = _generated_report()
+    report = _generated_report(metrics=_metrics())
 
+    assert report.report_mode == "insufficient"
     assert report.primary_diagnosis is None
-    assert report.mirror.confidence_label in {"low", "medium"}
-    assert len(report.evidence_chain) <= 3
+    assert report.diagnosis is None
+    assert report.perception_map is None
+    assert report.training_prescription is None
 
 
 def test_observation_weighting_prioritises_listener_impact():
@@ -202,7 +204,10 @@ def test_primary_diagnosis_comes_from_highest_weight_evidence_when_present():
         raw={"words_per_minute": 145.0},
         rhythm={"rhythm_consistency": 0.72},
     )
-    report = _generated_report(metrics=metrics)
+    transcript = _test_transcript(
+        "I guess there are a few things and the point depends because for example last week there was another thing to consider."
+    )
+    report = _generated_report(metrics=metrics, transcript=transcript)
 
     assert report.primary_diagnosis is not None
     assert report.evidence_chain[0].id == "unclear_path"
@@ -223,7 +228,10 @@ def test_coaching_targets_highest_expected_leverage_observation():
         raw={"words_per_minute": 145.0},
         rhythm={"rhythm_consistency": 0.72},
     )
-    report = _generated_report(metrics=metrics)
+    transcript = _test_transcript(
+        "I guess there are a few things and the point depends because for example last week there was another thing to consider."
+    )
+    report = _generated_report(metrics=metrics, transcript=transcript)
 
     assert report.highest_leverage_fix.evidence_ids[0] in {card.evidence_id for card in report.evidence_chain}
     assert report.training_prescription.drill_id in {"one_point_one_proof_v1", "point_proof_close_v1", "answer_first_v1"}

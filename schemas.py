@@ -920,6 +920,14 @@ class ReportValidation(BaseModel):
     duplicate_sections: list[str] = Field(default_factory=list)
 
 
+class InsufficientSample(BaseModel):
+    title: str | None = None
+    explanation: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    recommended_duration_seconds: int = 45
+    retry_instruction: str | None = None
+
+
 class AlternativeInterpretation(BaseModel):
     alternative_id: str
     text: str
@@ -998,6 +1006,8 @@ class ExplainabilityBundle(BaseModel):
 
 
 class AuthorityReport(BaseModel):
+    report_mode: Literal["full", "insufficient"] = "full"
+    insufficient_sample: InsufficientSample | None = None
     mirror: ReportMirror | None = None
     diagnosis: ReportDiagnosis | None = None
     perception_map: ReportPerceptionMap | None = None
@@ -1667,6 +1677,7 @@ class AnalyticsBundle(BaseModel):
 
 class AuthorityV2Response(BaseModel):
     schema_version: Literal["authority.v2"] = "authority.v2"
+    report_mode: Literal["full", "insufficient"] = "full"
     analysis_id: str = Field(default_factory=lambda: str(uuid4()))
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

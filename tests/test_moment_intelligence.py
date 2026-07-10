@@ -9,7 +9,7 @@ from services.moment_intelligence import attach_coaching_relevance, build_moment
 from services.report_builder import build_report
 from tests.test_diagnostic_reasoning import _diagnostic, _softened_expert_scores
 from tests.test_psychological_inference import _infer, _metrics
-from tests.test_report_builder import _evidence
+from tests.test_report_builder import _evidence, _test_transcript
 
 
 def _words() -> list[TranscriptWord]:
@@ -158,7 +158,10 @@ def test_coaching_relevance_links_selected_drill_to_moments():
 
 
 def test_report_timeline_consumes_moment_intelligence():
-    metrics = _metrics()
+    metrics = _metrics(
+        raw={"terminal_rising_ratio": 0.55},
+        linguistic={"opening_strength_score": 0.82, "closing_strength_score": 0.42, "structure_score": 0.72},
+    )
     scores = _softened_expert_scores()
     audio_quality = AudioQuality(usable=True, background_noise_level="low")
     uncertainty = Uncertainty(overall_confidence_label="medium_high", reasons=[])
@@ -167,7 +170,7 @@ def test_report_timeline_consumes_moment_intelligence():
     diagnostic = _diagnostic(scores=scores, metrics=metrics, audio_quality=audio_quality, uncertainty=uncertainty, duration_ms=60000, scenario="benchmark", inference=inference, evidence=_evidence(), moments=bundle.moments)
     coaching = build_deterministic_coaching(metrics=metrics, scores=scores, psychological_inference=inference, diagnostic_reasoning=diagnostic, report=None, audio_quality=audio_quality, uncertainty=uncertainty, duration_ms=60000, scenario="benchmark")
     bundle = attach_coaching_relevance(bundle, coaching)
-    report = build_report(scores=scores, metrics=metrics, psychological_inference=inference, diagnostic_reasoning=diagnostic, coaching_engine=coaching, evidence=_evidence(), moments=bundle.moments, uncertainty=uncertainty, audio_quality=audio_quality, duration_ms=60000, scenario="benchmark", moment_intelligence=bundle)
+    report = build_report(scores=scores, metrics=metrics, psychological_inference=inference, diagnostic_reasoning=diagnostic, coaching_engine=coaching, evidence=_evidence(), moments=bundle.moments, uncertainty=uncertainty, audio_quality=audio_quality, duration_ms=60000, scenario="benchmark", moment_intelligence=bundle, transcript=_test_transcript(duration_ms=60000))
 
     assert report.moment_intelligence.authority_arc.authority_arc == bundle.authority_arc.authority_arc
     assert report.timeline[0].supporting_metrics

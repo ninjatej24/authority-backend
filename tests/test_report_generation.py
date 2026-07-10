@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import re
 
-from schemas import AudioQuality, Moment, Uncertainty
+import pytest
+
+from schemas import AudioQuality, Moment, Transcript, TranscriptSegment, TranscriptWord, Uncertainty
+import services.report_generation as report_generation
 from services.deterministic_coaching import build_deterministic_coaching
 from services.report_builder import build_report
 from services.report_generation import (
@@ -48,15 +51,58 @@ INTERNAL_COPY_MARKERS = {
 }
 
 
+def _test_transcript(
+    text: str = "The main reason communication matters is that communicating my ideas better would help my future and create more opportunities.",
+    *,
+    confidence: float = 0.94,
+    duration_ms: int = 60000,
+) -> Transcript:
+    tokens = text.split()
+    step = max(duration_ms // max(len(tokens), 1), 1)
+    words = [
+        TranscriptWord(
+            text=token,
+            start_ms=index * step,
+            end_ms=min((index + 1) * step, duration_ms),
+            confidence=confidence,
+            timestamp_source="real",
+        )
+        for index, token in enumerate(tokens)
+    ]
+    cut = max(1, len(words) // 3)
+    return Transcript(
+        full_text=text,
+        speaker_language_confidence=confidence,
+        overall_asr_confidence=confidence,
+        words=words,
+        segments=[
+            TranscriptSegment(segment_id="seg_1", start_ms=words[0].start_ms, end_ms=words[cut - 1].end_ms, text=" ".join(tokens[:cut]), role="opening", timestamp_source="real"),
+            TranscriptSegment(segment_id="seg_2", start_ms=words[cut].start_ms, end_ms=words[-1].end_ms, text=" ".join(tokens[cut:]), role="body", timestamp_source="real"),
+        ],
+    )
+
+
 def _generated_report(**kwargs):
     scores = kwargs.pop("scores", _softened_expert_scores())
-    metrics = kwargs.pop("metrics", _metrics())
+    metrics = kwargs.pop(
+        "metrics",
+        _metrics(
+            linguistic={
+                "specificity_score": 0.12,
+                "concreteness_score": 0.08,
+                "opening_strength_score": 0.82,
+                "closing_strength_score": 0.72,
+                "structure_score": 0.74,
+            }
+        ),
+    )
     audio_quality = kwargs.pop("audio_quality", AudioQuality(usable=True, background_noise_level="low"))
     uncertainty = kwargs.pop("uncertainty", Uncertainty(overall_confidence_label="medium_high", reasons=[]))
     duration_ms = kwargs.pop("duration_ms", 60000)
     scenario = kwargs.pop("scenario", "benchmark")
     evidence = kwargs.pop("evidence", _evidence())
     moments = kwargs.pop("moments", _moments())
+    transcript = kwargs.pop("transcript", _test_transcript(duration_ms=duration_ms))
     inference = kwargs.pop("inference", _infer(metrics, audio_quality=audio_quality, duration_ms=duration_ms))
     diagnostic = kwargs.pop(
         "diagnostic_reasoning",
@@ -95,6 +141,7 @@ def _generated_report(**kwargs):
         audio_quality=audio_quality,
         duration_ms=duration_ms,
         scenario=scenario,
+        transcript=transcript,
     )
 
 
@@ -118,21 +165,33 @@ def _main_report_text(report) -> str:
     return str(payload)
 
 
+def _copy_similarity(a: str | None, b: str | None) -> float:
+    stop = {"the", "a", "an", "and", "or", "to", "of", "in", "for", "with", "that", "this", "it", "is", "are", "was", "were"}
+    left = set(re.sub(r"[^a-z0-9\s]", " ", (a or "").lower()).split()) - stop
+    right = set(re.sub(r"[^a-z0-9\s]", " ", (b or "").lower()).split()) - stop
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
 def _user_facing_copy(report) -> list[str]:
-    reads = report.perception_map.model_dump().values()
-    return [
-        report.mirror.headline,
-        report.mirror.identity_read,
-        report.diagnosis.core_pattern,
-        report.diagnosis.social_consequence,
+    reads = report.perception_map.model_dump().values() if report.perception_map else []
+    values = [
+        report.insufficient_sample.title if report.insufficient_sample else None,
+        report.insufficient_sample.explanation if report.insufficient_sample else None,
+        report.insufficient_sample.retry_instruction if report.insufficient_sample else None,
+        report.mirror.headline if report.mirror else None,
+        report.mirror.identity_read if report.mirror else None,
+        report.diagnosis.core_pattern if report.diagnosis else None,
+        report.diagnosis.social_consequence if report.diagnosis else None,
         *(read["text"] for read in reads if read),
-        report.hidden_cost.consequence,
-        report.highest_leverage_fix.plain_english,
-        report.highest_leverage_fix.why_this_matters,
-        report.highest_leverage_fix.action_step,
-        report.training_prescription.why_chosen,
-        report.training_prescription.success_signal,
-        *(report.training_prescription.instructions or []),
+        report.hidden_cost.consequence if report.hidden_cost else None,
+        report.highest_leverage_fix.plain_english if report.highest_leverage_fix else None,
+        report.highest_leverage_fix.why_this_matters if report.highest_leverage_fix else None,
+        report.highest_leverage_fix.action_step if report.highest_leverage_fix else None,
+        report.training_prescription.why_chosen if report.training_prescription else None,
+        report.training_prescription.success_signal if report.training_prescription else None,
+        *(report.training_prescription.instructions if report.training_prescription else []),
         *(item.signal for item in report.evidence_chain),
         *(item.what_happened for item in report.evidence_chain),
         *(item.listener_interpretation for item in report.evidence_chain),
@@ -140,19 +199,21 @@ def _user_facing_copy(report) -> list[str]:
         *(item.summary for item in report.timeline),
         *(item.listener_interpretation for item in report.timeline),
     ]
+    return [value for value in values if value]
 
 
 def _report_user_facing_strings(report) -> list[str]:
     sections = {
-        "mirror": report.mirror.model_dump(),
-        "diagnosis": report.diagnosis.model_dump(),
-        "perception_map": report.perception_map.model_dump(),
+        "insufficient_sample": report.insufficient_sample.model_dump() if report.insufficient_sample else None,
+        "mirror": report.mirror.model_dump() if report.mirror else None,
+        "diagnosis": report.diagnosis.model_dump() if report.diagnosis else None,
+        "perception_map": report.perception_map.model_dump() if report.perception_map else None,
         "evidence_chain": [item.model_dump() for item in report.evidence_chain],
         "timeline": [item.model_dump() for item in report.timeline],
-        "hidden_cost": report.hidden_cost.model_dump(),
-        "highest_leverage_fix": report.highest_leverage_fix.model_dump(),
-        "training_prescription": report.training_prescription.model_dump(),
-        "retest_plan": report.retest_plan.model_dump(),
+        "hidden_cost": report.hidden_cost.model_dump() if report.hidden_cost else None,
+        "highest_leverage_fix": report.highest_leverage_fix.model_dump() if report.highest_leverage_fix else None,
+        "training_prescription": report.training_prescription.model_dump() if report.training_prescription else None,
+        "retest_plan": report.retest_plan.model_dump() if report.retest_plan else None,
     }
     ignored_keys = {
         "id",
@@ -239,7 +300,8 @@ def test_dimension_reports_are_generated_from_existing_reasoning():
         assert dimension_report.meaning
         assert dimension_report.listener_consequence
         assert dimension_report.one_improvement_cue
-        assert dimension_report.linked_evidence
+        if dimension_report.linked_evidence:
+            assert all(evidence_id.startswith("fact_ev_") for evidence_id in dimension_report.linked_evidence)
 
 
 def test_authority_type_is_deterministic_from_dimension_profile():
@@ -317,16 +379,59 @@ def test_empty_or_no_speech_sample_returns_insufficient_report():
     audio_quality = AudioQuality(usable=False, background_noise_level="unknown", quality_warnings=["No usable speech detected"])
     report = _generated_report(scores=scores, metrics=metrics, audio_quality=audio_quality, duration_ms=720)
 
-    assert "not enough usable speech" in report.mirror.headline.lower()
-    assert report.authority_type.label == "Insufficient Sample"
+    assert report.report_mode == "insufficient"
+    assert report.insufficient_sample
+    assert "stronger sample" in report.insufficient_sample.title.lower()
     assert report.primary_diagnosis is None
-    assert report.diagnosis.primary_strength_dimension is None
-    assert report.diagnosis.primary_limiting_dimension is None
-    assert len(report.evidence_chain) == 1
-    assert report.evidence_chain[0].related_dimension == "Sample quality"
+    assert report.mirror is None
+    assert report.diagnosis is None
+    assert report.perception_map is None
+    assert report.evidence_chain == []
     assert report.timeline == []
-    assert "30 to 60 second" in report.training_prescription.why_chosen.lower() or "30 to 60 second" in " ".join(report.training_prescription.instructions).lower()
-    assert report.share_card.percentile_label is None
+    assert report.dimension_reports == {}
+    assert report.hidden_cost is None
+    assert report.highest_leverage_fix is None
+    assert report.training_prescription is None
+    assert report.retest_plan is None
+    assert report.authority_type is None
+    assert report.share_card is None
+    assert "30 to 60 second" in report.insufficient_sample.retry_instruction.lower()
+
+
+def test_usable_recording_without_fact_diagnosis_is_insufficient_only():
+    report = _generated_report(metrics=_metrics())
+    text = " ".join(_report_user_facing_strings(report)).lower()
+
+    assert report.report_mode == "insufficient"
+    assert report.primary_diagnosis is None
+    assert report.diagnosis is None
+    assert report.perception_map is None
+    assert report.hidden_cost is None
+    assert report.training_prescription is None
+    assert "plateau" not in text
+    assert "sharper target" not in text
+    assert "harder prompt" not in text
+    assert report.dimension_reports == {}
+
+
+def test_empty_transcript_is_insufficient_only():
+    empty = Transcript(full_text="", words=[], segments=[], overall_asr_confidence=0.9)
+    report = _generated_report(transcript=empty)
+
+    assert report.report_mode == "insufficient"
+    assert report.insufficient_sample
+    assert report.mirror is None
+    assert report.diagnosis is None
+    assert report.perception_map is None
+
+
+def test_unusable_audio_is_insufficient_only():
+    report = _generated_report(audio_quality=AudioQuality(usable=False, background_noise_level="high"))
+
+    assert report.report_mode == "insufficient"
+    assert report.insufficient_sample
+    assert report.diagnosis is None
+    assert report.training_prescription is None
 
 
 def test_zero_filler_does_not_produce_high_filler_warning():
@@ -363,14 +468,33 @@ def test_short_recording_suppresses_strong_psychological_claims():
     )
     report = _generated_report(metrics=metrics, duration_ms=9000)
 
-    assert report.mirror.confidence_label == "low"
-    assert "not enough reliable evidence" in report.mirror.headline.lower()
-    assert all(item.direction != "negative" for item in report.evidence_chain)
+    assert report.report_mode == "insufficient"
+    assert report.mirror is None
+    assert report.diagnosis is None
+    assert report.perception_map is None
+    assert report.evidence_chain == []
+    assert report.training_prescription is None
+
+
+def test_no_diagnosis_path_does_not_call_full_section_builders(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise AssertionError("full section builder should not run")
+
+    monkeypatch.setattr(report_generation, "_fact_mirror", fail)
+    monkeypatch.setattr(report_generation, "_fact_report_diagnosis", fail)
+    monkeypatch.setattr(report_generation, "_fact_perception_map", fail)
+
+    report = _generated_report(metrics=_metrics())
+
+    assert report.report_mode == "insufficient"
 
 
 def test_valid_report_evidence_connects_signal_interpretation_consequence_and_fix():
     report = _generated_report()
 
+    assert report.report_mode == "full"
+    assert report.insufficient_sample is None
+    assert report.primary_diagnosis is not None
     assert 1 <= len(report.evidence_chain) <= 3
     for item in report.evidence_chain:
         assert item.signal
@@ -380,6 +504,56 @@ def test_valid_report_evidence_connects_signal_interpretation_consequence_and_fi
         assert "diagnosis" in item.why_it_matters.lower() or "supporting behaviour" in item.why_it_matters.lower()
         assert item.recording_fact_ids
         assert item.related_dimension
+
+
+def test_full_report_has_no_insufficient_or_fallback_language():
+    report = _generated_report()
+    text = " ".join(_report_user_facing_strings(report)).lower()
+
+    assert report.report_mode == "full"
+    for phrase in [
+        "insufficient evidence",
+        "no single limiter",
+        "plateau",
+        "sharper target",
+        "harder prompt",
+        "broad baseline",
+        "low-confidence read",
+        "directional",
+    ]:
+        assert phrase not in text
+
+
+def test_full_report_training_matches_diagnosis_target():
+    report = _generated_report()
+    drill = next(item for item in report.coaching_engine.drill_library if item.drill_id == report.training_prescription.drill_id)
+
+    assert report.report_mode == "full"
+    assert report.primary_diagnosis
+    assert report.training_prescription
+    assert "grounded_specificity" in drill.target_behaviours or drill.category == "specificity"
+
+
+def test_perception_reads_are_supported_distinct_and_not_diagnosis_duplicates():
+    report = _generated_report()
+    reads = [read["text"] for read in report.perception_map.model_dump().values() if read]
+
+    assert reads
+    for index, read in enumerate(reads):
+        assert _copy_similarity(read, report.mirror.identity_read) < 0.72
+        assert _copy_similarity(read, report.diagnosis.core_pattern) < 0.72
+        assert all(_copy_similarity(read, other) < 0.72 for other in reads[index + 1 :])
+
+
+def test_dimension_reports_do_not_name_limiter_without_diagnosis_support():
+    report = _generated_report()
+    diagnosis_dims = set(report.primary_diagnosis.affected_dimensions)
+
+    assert report.report_mode == "full"
+    for dimension, details in report.dimension_reports.items():
+        text = " ".join(details.why).lower()
+        if "limiting fact" in text:
+            assert details.label in diagnosis_dims or details.label in report.diagnosis.core_pattern
 
 
 def test_technical_appendix_keeps_raw_metric_style_values():
@@ -462,15 +636,11 @@ def test_report_organizes_around_one_dominant_diagnosis():
     diagnosis = report.diagnosis.core_pattern.lower().rstrip(".")
 
     assert diagnosis
-    if report.primary_diagnosis is None:
-        assert report.mirror.confidence_label in {"low", "medium"}
-        assert report.highest_leverage_fix.evidence_ids
-        assert len(report.evidence_chain) <= 3
-    else:
-        assert diagnosis in report.mirror.headline.lower()
-        assert diagnosis in report.mirror.identity_read.lower()
-        assert diagnosis in report.highest_leverage_fix.plain_english.lower()
-        assert diagnosis in report.training_prescription.why_chosen.lower()
+    assert report.report_mode == "full"
+    assert report.primary_diagnosis is not None
+    assert _copy_similarity(diagnosis, report.mirror.identity_read) < 0.72
+    assert report.highest_leverage_fix.evidence_ids
+    assert report.training_prescription.evidence_ids
 
 
 def test_selected_diagnosis_is_stable_after_evidence_trimming():
@@ -578,11 +748,10 @@ def test_evidence_cards_support_report_diagnosis_or_clarify_uncertainty():
 def test_diagnostic_reasoning_and_report_diagnosis_do_not_conflict():
     report = _generated_report()
 
-    if report.primary_diagnosis is None:
-        assert report.mirror.confidence_label in {"low", "medium"}
-    else:
-        assert report.primary_diagnosis.diagnosis_name == report.diagnosis.core_pattern
-        assert set(report.primary_diagnosis.supporting_evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
+    assert report.report_mode == "full"
+    assert report.primary_diagnosis is not None
+    assert report.primary_diagnosis.diagnosis_id in {item.id for item in report.evidence_chain}
+    assert set(report.primary_diagnosis.supporting_evidence_ids).issubset({item.evidence_id for item in report.evidence_chain})
 
 
 def test_contradictions_reduce_confidence_instead_of_becoming_extra_unrelated_cards():
@@ -601,6 +770,7 @@ def test_contradictions_reduce_confidence_instead_of_becoming_extra_unrelated_ca
 def test_short_recording_suppresses_timeline_precision():
     report = _generated_report(duration_ms=9000)
 
+    assert report.report_mode == "insufficient"
     assert report.timeline == []
 
 
@@ -608,13 +778,12 @@ def test_hidden_cost_fix_and_training_derive_from_selected_diagnosis():
     report = _generated_report()
     pattern = report.diagnosis.core_pattern.lower().rstrip(".")
 
-    if report.primary_diagnosis is not None:
-        assert pattern in report.hidden_cost.consequence.lower()
-        assert pattern in report.highest_leverage_fix.plain_english.lower()
-        assert pattern in report.training_prescription.why_chosen.lower()
-    else:
-        assert report.highest_leverage_fix.evidence_ids
-        assert report.training_prescription.evidence_ids
+    assert report.report_mode == "full"
+    assert report.primary_diagnosis is not None
+    assert _copy_similarity(pattern, report.hidden_cost.consequence) < 0.72
+    assert report.hidden_cost.evidence_ids
+    assert report.highest_leverage_fix.evidence_ids
+    assert report.primary_diagnosis.supporting_traits[0].replace("_", " ") in report.training_prescription.why_chosen
     assert report.training_prescription.instructions
     assert report.training_prescription.action_step
 

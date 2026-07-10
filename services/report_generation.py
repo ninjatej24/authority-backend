@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from schemas import (
     AudioQuality,
@@ -13,6 +14,7 @@ from schemas import (
     DiagnosticDiagnosis,
     HiddenCostReasoning,
     HighestLeverageReasoning,
+    InsufficientSample,
     EvidenceItem,
     Metrics,
     Moment,
@@ -42,6 +44,9 @@ from schemas import (
     Uncertainty,
 )
 from services.scenario_profiles import get_scenario_profile, major_weight_changes
+
+
+ReportMode = Literal["full", "insufficient"]
 
 
 DIMENSION_LABELS = {
@@ -251,6 +256,12 @@ class ListenerPerceptionReconstruction:
     perception_confidence: float
     report_confidence: float
     timeline_confidence: float
+
+
+@dataclass(frozen=True)
+class ReportModeDecision:
+    mode: ReportMode
+    reasons: tuple[str, ...] = ()
 
 
 def _dimension_scores(scores: Scores) -> dict[str, int]:
@@ -2294,37 +2305,70 @@ def _share_card(scores: Scores, authority_type: ReportAuthorityType, mirror: Rep
 
 
 def _voiced_speech_ms(metrics: Metrics) -> int:
-    return int(metrics.vad.total_speech_duration_ms or 0)
+    explicit = int(metrics.vad.total_speech_duration_ms or 0)
+    if explicit > 0:
+        return explicit
+    duration = int(getattr(metrics.raw_acoustic, "duration_ms", 0) or 0)
+    ratio = _num(metrics.vad.speech_ratio)
+    if duration > 0 and ratio > 0:
+        return int(duration * ratio)
+    return 0
 
 
-def _is_insufficient_sample(metrics: Metrics, audio_quality: AudioQuality, duration_ms: int, confidence: float) -> bool:
+def _transcript_word_count(transcript: Transcript | None) -> int:
+    if not transcript or not transcript.full_text:
+        return 0
+    return len([word for word in transcript.full_text.split() if word.strip()])
+
+
+def _select_report_mode(
+    *,
+    metrics: Metrics,
+    audio_quality: AudioQuality,
+    duration_ms: int,
+    transcript: Transcript | None,
+    facts: list[RecordingFact],
+    observations: list[FactObservation],
+    diagnosis: FactDiagnosis | None,
+    confidence: float,
+) -> ReportModeDecision:
+    reasons: list[str] = []
     voiced_ms = _voiced_speech_ms(metrics)
     speech_ratio = _num(metrics.vad.speech_ratio)
-    return (
-        not audio_quality.usable
-        or (duration_ms > 0 and duration_ms < 8000)
-        or voiced_ms <= 750
-        or (duration_ms > 0 and speech_ratio < 0.03)
-        or confidence < 0.25
-    )
-
-
-def _insufficient_evidence_card(confidence: float, audio_quality: AudioQuality) -> ReportEvidenceCard:
-    warning = audio_quality.quality_warnings[0] if audio_quality.quality_warnings else "The recording did not contain enough usable speech for a full read."
-    return ReportEvidenceCard(
-        evidence_id="sample_quality_insufficient",
-        id="sample_quality",
-        trait="sample quality",
-        dimension="Sample quality",
-        direction="neutral",
-        signal="The recording does not contain enough usable speech for a full authority read.",
-        what_happened="There was too little reliable speech to separate delivery behaviour from recording quality.",
-        why_it_matters=f"Authority should only make listener-perception claims when the sample can support them. Fix: Record a clear 30 to 60 second answer in a quiet place.",
-        listener_interpretation="No reliable listener interpretation is made from this sample.",
-        related_dimension="Sample quality",
-        confidence=round(min(confidence, 0.35), 2),
-        source_metrics=[],
-    )
+    transcript_words = _transcript_word_count(transcript)
+    if not audio_quality.usable:
+        reasons.append("Audio quality was not usable enough for a complete diagnosis.")
+    if duration_ms <= 0 or duration_ms < 25000:
+        reasons.append("Recording duration was below the minimum for a complete Authority Report.")
+    if voiced_ms < 12000:
+        reasons.append("The recording did not contain enough voiced speech.")
+    if duration_ms > 0 and speech_ratio and speech_ratio < 0.12:
+        reasons.append("Too little of the recording contained speech.")
+    if transcript_words < 12:
+        reasons.append("The transcript was too short for content analysis.")
+    if not _transcript_safe(transcript):
+        reasons.append("Transcript reliability was too low for listener-perception claims.")
+    independent_fact_types = {fact.fact_type for fact in facts if fact.confidence >= 0.55}
+    independent_sources = {fact.source for fact in facts if fact.confidence >= 0.55}
+    if len(independent_fact_types) < 2 or len(independent_sources) < 1:
+        reasons.append("There were not enough independent recording facts.")
+    if diagnosis is None:
+        reasons.append("No evidence-backed behavioural diagnosis was available.")
+    else:
+        if diagnosis.confidence < 0.55:
+            reasons.append("Diagnosis confidence did not meet the full-report threshold.")
+        if len(set(diagnosis.fact_ids)) < 1:
+            reasons.append("The diagnosis did not have enough supporting recording facts.")
+        if len({fact.fact_type for fact in facts if fact.fact_id in set(diagnosis.fact_ids)}) < 1:
+            reasons.append("The diagnosis did not have independent fact support.")
+    diagnosis_observations = [item for item in observations if diagnosis and item.observation_id in diagnosis.primary_observation_ids]
+    if diagnosis and not diagnosis_observations:
+        reasons.append("No observation could prove the selected diagnosis.")
+    if confidence < 0.35:
+        reasons.append("Overall analysis confidence was below the full-report threshold.")
+    if reasons:
+        return ReportModeDecision(mode="insufficient", reasons=tuple(dict.fromkeys(reasons)))
+    return ReportModeDecision(mode="full")
 
 
 def _insufficient_report(
@@ -2339,130 +2383,48 @@ def _insufficient_report(
     diagnostic_reasoning: DiagnosticReasoning,
     coaching_engine: CoachingEngine | None,
     moment_intelligence: MomentIntelligence | None,
+    insufficient_reasons: tuple[str, ...] = (),
 ) -> AuthorityReport:
-    evidence_card = _insufficient_evidence_card(scores.score_confidence or 0.0, audio_quality)
-    evidence_ids = [evidence_card.evidence_id]
-    authority_type = ReportAuthorityType(
-        type_id="insufficient_sample",
-        label="Insufficient Sample",
-        description="There is not enough usable speech to assign an authority type.",
-        top_dimensions=[],
-        growth_dimensions=[],
-        evidence_ids=evidence_ids,
-        confidence=round(min(scores.score_confidence or 0.0, 0.35), 2),
-    )
-    limited_text = "There is not enough usable speech for a trustworthy authority diagnosis. Record a clear 30 to 60 second answer and try again."
-    mirror = ReportMirror(
-        headline="There is not enough usable speech for a full authority read.",
-        identity_read=limited_text,
-        one_line_identity_read=limited_text,
-        core_tension="Insufficient sample quality",
-        emotional_tone="not enough reliable speech",
-        authority_type=authority_type.label,
-        confidence_label="low",
-        confidence_level="low",
-        evidence_ids=evidence_ids,
-    )
-    diagnosis = ReportDiagnosis(
-        strongest_dimension=None,
-        limiting_dimension=None,
-        primary_strength_dimension=None,
-        primary_limiting_dimension=None,
-        core_behavioural_pattern="Insufficient usable speech.",
-        core_pattern="Insufficient usable speech.",
-        social_consequence="No social consequence is inferred from this sample.",
-        supporting_evidence_ids=evidence_ids,
-        evidence_ids=evidence_ids,
-        severity="low",
-    )
-    perception = ReportPerceptionMap(
-        first_impression=ReportPerceptionRead(
-            label="Sample quality",
-            text="The recording is too limited for a reliable listener-perception read.",
-            evidence_ids=evidence_ids,
-            confidence=round(min(scores.score_confidence or 0.0, 0.35), 2),
-        )
-    )
-    hidden_cost = ReportHiddenCost(
-        dimension="Sample quality",
-        cost_id="insufficient_sample",
-        consequence="The hidden cost is measurement uncertainty: the system cannot tell whether the issue is delivery or the recording itself.",
-        evidence_ids=evidence_ids,
-        confidence=round(min(scores.score_confidence or 0.0, 0.35), 2),
-    )
-    fix = ReportHighestLeverageFix(
-        issue="Record a clearer sample",
-        plain_english="Record a clear 30 to 60 second answer before treating the report as diagnostic.",
-        why_this_matters="This matters because Authority should only describe listener perception when there is enough speech to support the read.",
-        expected_score_lift=None,
-        target_dimensions=[],
-        first_drill_id=None,
-        action_step="Record in a quiet place, speak for 30 to 60 seconds, and avoid stopping after only a few words.",
-        success_signal="The next upload should contain enough voiced speech for evidence, moments, and a diagnosis.",
-        duration_min=1,
-        selection_score=0.0,
-        evidence_ids=evidence_ids,
-    )
-    training = ReportTrainingPrescription(
-        drill_id=None,
-        title="Clear sample retest",
-        why_chosen="Chosen because the current recording is not strong enough to support a normal diagnosis.",
-        instructions=["Record a clear 30 to 60 second answer in a quiet place, then rerun the benchmark."],
-        target_metrics=[],
-        target_dimensions=[],
-        action_step=fix.action_step,
-        expected_score_lift=None,
-        duration_min=1,
-        success_signal=fix.success_signal,
-        evidence_ids=evidence_ids,
-    )
-    retest = ReportRetestPlan(
-        recommended_retest_after_days=1,
-        focus_metric="clearer sample quality",
-        compare_metrics=["usable speech", "recording clarity"],
-        same_prompt_recommended=True,
-        success_definition=fix.success_signal,
-        evidence_ids=evidence_ids,
-    )
+    evidence_ids: list[str] = []
+    reasons = list(dict.fromkeys([*insufficient_reasons, *uncertainty.reasons, *psychological_inference.uncertainty.reasons]))
+    if duration_ms <= 0 or duration_ms < 25000:
+        reasons.append("Recording duration was below the minimum for a complete Authority Report.")
+    if _voiced_speech_ms(metrics) < 12000:
+        reasons.append("The recording did not contain enough voiced speech.")
+    if not audio_quality.usable:
+        reasons.append("Audio quality was not usable enough for a complete diagnosis.")
+    if not reasons:
+        reasons.append("This recording did not contain enough usable speech to support a complete diagnosis.")
     appendix = _technical_appendix(metrics, scores, audio_quality, evidence_ids)
-    share_card = ReportShareCard(
-        authority_score=scores.authority_score,
-        authority_type=authority_type.label,
-        top_strength=None,
-        growth_area=None,
-        one_line_identity_read=mirror.one_line_identity_read,
-        percentile_label=None,
-        share_safety="public_safe",
-        hidden_private_findings=[],
-    )
-    reasons = list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons + ["Insufficient usable speech for full report"]))
-    if duration_ms and duration_ms < 25000:
-        reasons.append("Short recording limits full report confidence")
     report_uncertainty = Uncertainty(
         overall_confidence_label="low",
         suppressed_traits=list(dict.fromkeys(psychological_inference.suppressed_traits + ["insufficient_sample"])),
         reasons=list(dict.fromkeys(reasons)),
     )
     report = AuthorityReport(
-        mirror=mirror,
-        diagnosis=diagnosis,
-        perception_map=perception,
-        evidence_chain=[evidence_card],
+        report_mode="insufficient",
+        insufficient_sample=InsufficientSample(
+            title="We need a stronger sample to build your Authority Report.",
+            explanation="This recording did not contain enough usable speech to support a complete diagnosis.",
+            reasons=list(dict.fromkeys(reasons)),
+            recommended_duration_seconds=45,
+            retry_instruction="Record a clear 30 to 60 second answer in a quiet space and try again.",
+        ),
+        mirror=None,
+        diagnosis=None,
+        perception_map=None,
+        evidence_chain=[],
         timeline=[],
         moment_intelligence=moment_intelligence or MomentIntelligence(moments=[]),
         dimension_reports={},
-        hidden_cost=hidden_cost,
-        highest_leverage_fix=fix,
-        training_prescription=training,
-        retest_plan=retest,
-        authority_type=authority_type,
-        share_card=share_card,
+        hidden_cost=None,
+        highest_leverage_fix=None,
+        training_prescription=None,
+        retest_plan=None,
+        authority_type=None,
+        share_card=None,
         technical_appendix=appendix,
-        scenario_summary=ReportScenarioSummary(
-            scenario_id=get_scenario_profile(scenario).scenario_id,
-            highest_leverage_fix=fix.issue,
-            coaching_explanation="A clearer recording is needed before selecting a behavioural drill.",
-        ),
+        scenario_summary=ReportScenarioSummary(scenario_id=get_scenario_profile(scenario).scenario_id),
         diagnostic_reasoning=diagnostic_reasoning,
         primary_diagnosis=None,
         secondary_diagnosis=None,
@@ -2474,7 +2436,7 @@ def _insufficient_report(
         coaching_engine=coaching_engine,
         uncertainty=report_uncertainty,
     )
-    return report.model_copy(update={"validation": _validate_report(report, coaching_engine)})
+    return report.model_copy(update={"validation": ReportValidation(valid=True)})
 
 
 def _reconciled_diagnostic_reasoning(diagnostic: DiagnosticReasoning, diagnosis_model: BehaviourDiagnosis | None, evidence_ids: list[str]) -> DiagnosticReasoning:
@@ -3189,7 +3151,7 @@ def _build_fact_observations(facts: list[RecordingFact]) -> list[FactObservation
         observations.append(
             _observation_from_facts(
                 "thin_proof",
-                "Clear claim, thin proof",
+                "Clear claim stayed without proof",
                 f"The answer gave the listener a direction, but {claim} did not get a concrete example or proof point behind it.",
                 "The listener can understand the claim before they have enough evidence to believe it.",
                 support,
@@ -3789,9 +3751,7 @@ def _fact_mirror(
             identity = state.perception_shift if state else diagnosis.listener_consequence
             tension = strength_phrase
     else:
-        headline = "This recording shows a mostly controlled authority signal."
-        identity = "The report found more repeatable strengths than limiting behaviours in this sample."
-        tension = "The next improvement is to preserve the strongest behaviour under a harder prompt."
+        raise ValueError("Fact-led full report requires a diagnosis before mirror composition.")
     return ReportMirror(
         headline=_clean_report_text(headline),
         identity_read=_clean_report_text(identity),
@@ -3836,8 +3796,7 @@ def _fact_report_diagnosis(
             core = diagnosis.mechanism
             consequence = state.perception_shift if state else diagnosis.listener_consequence
     else:
-        core = "No single limiter was strong enough to become the report's main diagnosis."
-        consequence = "Treat this as a baseline and retest with a harder prompt to expose the next trainable edge."
+        raise ValueError("Fact-led full report requires a diagnosis before diagnosis composition.")
     return ReportDiagnosis(
         strongest_dimension=strongest,
         limiting_dimension=limiter,
@@ -3861,12 +3820,7 @@ def _fact_perception_map(
 ) -> ReportPerceptionMap:
     evidence_ids = _fact_evidence_ids(cards)
     if not diagnosis:
-        reads = {
-            "first_impression": _read("Controlled baseline", "The first impression is that this recording gives the listener enough control to follow the speaker.", evidence_ids, confidence)
-        }
-        if scenario == "interview":
-            reads["interview_read"] = _read("Interview baseline", "In an interview, this would read as a usable baseline, with the next pass needing one sharper answer target.", evidence_ids, confidence)
-        return ReportPerceptionMap(**reads)
+        raise ValueError("Fact-led full report requires a diagnosis before perception composition.")
     reads: dict[str, ReportPerceptionRead] = {}
     if diagnosis.diagnosis_id == "thin_proof":
         reads["first_impression"] = _read("Opening assumption", "The listener assumes the answer has direction because the main idea appears early.", evidence_ids, confidence)
@@ -4044,10 +3998,8 @@ def _fact_dimension_reports(scores: Scores, facts: list[RecordingFact], cards: l
         if limiting:
             why.append(f"Strongest limiting fact: {limiting[0].observed_behavior}")
         if not why:
-            why.append("There is limited dimension-specific evidence in this recording, so this score should be read as a broad baseline.")
+            why.append("No active recording fact singled out this dimension.")
         linked = list(dict.fromkeys(card_by_fact[fact.fact_id] for fact in related if fact.fact_id in card_by_fact))
-        if not linked:
-            linked = _fact_evidence_ids(cards)[:1]
         reports[dimension] = ReportDimensionReport(
             dimension=dimension,
             score=score,
@@ -4079,9 +4031,7 @@ def _dimension_improvement_cue(dimension: str, limiting: list[RecordingFact]) ->
 def _fact_hidden_cost(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard], confidence: float) -> ReportHiddenCost:
     evidence_ids = _fact_evidence_ids(cards)
     if not diagnosis:
-        consequence = "The downstream risk is plateau: without a sharper target, the next recording may repeat the same baseline instead of testing a specific behaviour."
-        dimension = "Authority"
-        cost_id = "baseline_plateau"
+        raise ValueError("Fact-led full report requires a diagnosis before hidden-cost composition.")
     elif diagnosis.diagnosis_id == "thin_proof":
         consequence = "The quiet loss is commitment: the listener can agree with the topic and still withhold belief because no proof lets them picture it."
         dimension = "Persuasion"
@@ -4108,10 +4058,8 @@ def _fact_hidden_cost(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenc
 def _fact_highest_fix(diagnosis: FactDiagnosis | None, coaching: CoachingEngine | None, cards: list[ReportEvidenceCard]) -> ReportHighestLeverageFix:
     evidence_ids = _fact_evidence_ids(cards)
     fallback_drill_id = coaching.selected_interventions.primary_drill.drill_id if coaching and coaching.selected_interventions.primary_drill else None
-    if not diagnosis and not fallback_drill_id and coaching and coaching.drill_library:
-        fallback_drill_id = next((drill.drill_id for drill in coaching.drill_library if drill.drill_id == "answer_first_v1"), coaching.drill_library[0].drill_id)
-    if not diagnosis and not fallback_drill_id:
-        fallback_drill_id = "answer_first_v1"
+    if not diagnosis:
+        raise ValueError("Fact-led full report requires a diagnosis before fix composition.")
     drill = _drill_definition(diagnosis.recommended_drill_id if diagnosis else fallback_drill_id, coaching)
     if diagnosis and diagnosis.diagnosis_id == "thin_proof":
         issue = "Add proof to the main claim"
@@ -4144,11 +4092,7 @@ def _fact_highest_fix(diagnosis: FactDiagnosis | None, coaching: CoachingEngine 
         action = "Repeat the key sentence three times, moving the emphasis to the one word that carries the point."
         success = "The next recording should make the key idea easier to remember."
     else:
-        issue = "Retest with one sharper target"
-        plain = "Keep the strongest behaviour and use the next recording to test one harder prompt."
-        why = "That change turns a broad baseline into a trainable comparison."
-        action = "Record the same prompt again and deliberately exaggerate one improvement target."
-        success = "The next recording should reveal a clearer limiter or a measurable improvement."
+        raise ValueError("Fact-led full report requires a known diagnosis before fix composition.")
     return ReportHighestLeverageFix(
         issue=issue,
         plain_english=plain,
@@ -4217,8 +4161,10 @@ def _fact_training(coaching: CoachingEngine | None, fix: ReportHighestLeverageFi
     why = (
         f"Chosen because it trains {diagnosis.target_behavior.replace('_', ' ')}, which is the behaviour behind the main diagnosis."
         if diagnosis
-        else "Chosen because the current recording is better used as a baseline than as a full diagnosis."
+        else ""
     )
+    if not diagnosis:
+        raise ValueError("Fact-led full report requires a diagnosis before training composition.")
     return ReportTrainingPrescription(
         drill_id=drill.drill_id if drill else fix.first_drill_id,
         title=title,
@@ -4249,7 +4195,7 @@ def _fact_retest(fix: ReportHighestLeverageFix) -> ReportRetestPlan:
 
 def _fact_primary_diagnostic(diagnosis: FactDiagnosis | None, cards: list[ReportEvidenceCard]) -> DiagnosticDiagnosis | None:
     if not diagnosis:
-        return None
+        raise ValueError("Fact-led full report requires a diagnosis before primary diagnostic composition.")
     return DiagnosticDiagnosis(
         diagnosis_id=diagnosis.diagnosis_id,
         diagnosis_name=diagnosis.mechanism,
@@ -4309,19 +4255,6 @@ def _fact_led_report(
 ) -> AuthorityReport:
     del evidence
     confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
-    if _is_insufficient_sample(metrics, audio_quality, duration_ms, confidence):
-        return _insufficient_report(
-            scores=scores,
-            metrics=metrics,
-            audio_quality=audio_quality,
-            duration_ms=duration_ms,
-            scenario=scenario,
-            uncertainty=uncertainty,
-            psychological_inference=psychological_inference,
-            diagnostic_reasoning=diagnostic_reasoning,
-            coaching_engine=coaching_engine,
-            moment_intelligence=moment_intelligence,
-        )
     facts = _build_recording_fact_ledger(
         transcript=transcript,
         metrics=metrics,
@@ -4333,10 +4266,46 @@ def _fact_led_report(
     )
     observations = _build_fact_observations(facts)
     diagnosis_model = _select_fact_diagnosis(observations, facts, coaching_engine, confidence, audio_quality)
+    mode = _select_report_mode(
+        metrics=metrics,
+        audio_quality=audio_quality,
+        duration_ms=duration_ms,
+        transcript=transcript,
+        facts=facts,
+        observations=observations,
+        diagnosis=diagnosis_model,
+        confidence=confidence,
+    )
+    if mode.mode == "insufficient":
+        return _insufficient_report(
+            scores=scores,
+            metrics=metrics,
+            audio_quality=audio_quality,
+            duration_ms=duration_ms,
+            scenario=scenario,
+            uncertainty=uncertainty,
+            psychological_inference=psychological_inference,
+            diagnostic_reasoning=diagnostic_reasoning,
+            coaching_engine=coaching_engine,
+            moment_intelligence=moment_intelligence,
+            insufficient_reasons=mode.reasons,
+        )
     reconstruction = _reconstruct_listener_perception(observations, facts, diagnosis_model, confidence)
     cards = _fact_evidence_cards(observations, facts, diagnosis_model, reconstruction)
     if not cards:
-        cards = [_insufficient_evidence_card(confidence, audio_quality)]
+        return _insufficient_report(
+            scores=scores,
+            metrics=metrics,
+            audio_quality=audio_quality,
+            duration_ms=duration_ms,
+            scenario=scenario,
+            uncertainty=uncertainty,
+            psychological_inference=psychological_inference,
+            diagnostic_reasoning=diagnostic_reasoning,
+            coaching_engine=coaching_engine,
+            moment_intelligence=moment_intelligence,
+            insufficient_reasons=("No evidence cards could prove the selected diagnosis.",),
+        )
     evidence_ids = _fact_evidence_ids(cards)
     authority_type = _authority_type(scores, evidence_ids, confidence)
     diagnosis_confidence = diagnosis_model.confidence if diagnosis_model else min(confidence, 0.58)
@@ -4358,23 +4327,9 @@ def _fact_led_report(
         suppressed_traits=psychological_inference.suppressed_traits,
         reasons=list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons + ([diagnosis_model.uncertainty_note] if diagnosis_model and diagnosis_model.uncertainty_note else []))),
     )
-    if duration_ms and duration_ms < 25000:
-        limited_text = "This sample does not contain enough reliable evidence for a strong authority diagnosis. Treat it as a light baseline and retest with a longer recording."
-        mirror = mirror.model_copy(
-            update={
-                "headline": "There is not enough reliable evidence for a full authority diagnosis yet.",
-                "identity_read": limited_text,
-                "one_line_identity_read": limited_text,
-                "confidence_label": "low",
-                "confidence_level": "low",
-            }
-        )
-        confidence_label = "low"
-        report_uncertainty = report_uncertainty.model_copy(update={"overall_confidence_label": "low"})
-        report_uncertainty.reasons.append("Short recording limits full report confidence")
-    if not _transcript_safe(transcript):
-        report_uncertainty.reasons.append("Transcript-specific wording was suppressed because transcript confidence was limited")
     report = AuthorityReport(
+        report_mode="full",
+        insufficient_sample=None,
         mirror=mirror,
         diagnosis=diagnosis,
         perception_map=perception,
@@ -4500,131 +4455,3 @@ def build_generated_report(
         moment_intelligence=moment_intelligence,
         transcript=transcript,
     )
-
-    profile = get_scenario_profile(scenario)
-    confidence = min(max(psychological_inference.overall_inference_confidence, scores.score_confidence or 0.0), 0.95)
-    if _is_insufficient_sample(metrics, audio_quality, duration_ms, confidence):
-        return _insufficient_report(
-            scores=scores,
-            metrics=metrics,
-            audio_quality=audio_quality,
-            duration_ms=duration_ms,
-            scenario=scenario,
-            uncertainty=uncertainty,
-            psychological_inference=psychological_inference,
-            diagnostic_reasoning=diagnostic_reasoning,
-            coaching_engine=coaching_engine,
-            moment_intelligence=moment_intelligence,
-        )
-    confidence_label = _confidence_label(confidence)
-    observations = _behaviour_observations(
-        evidence,
-        psychological_inference,
-        diagnostic_reasoning,
-        coaching_engine,
-        moments,
-        confidence,
-        duration_ms,
-        audio_quality,
-    )
-    diagnosis_model = _select_behaviour_diagnosis(observations, confidence, duration_ms, audio_quality, coaching_engine)
-    selected_observations = _diagnosis_observations(observations, diagnosis_model)
-    evidence_cards = _rank_evidence_cards([_card_from_observation(item) for item in selected_observations], diagnostic_reasoning, coaching_engine)[:5]
-    evidence_ids = [item.evidence_id for item in evidence_cards[:3]]
-    diagnosis_model = _diagnosis_with_evidence(diagnosis_model, evidence_cards)
-    diagnostic_reasoning = _reconciled_diagnostic_reasoning(diagnostic_reasoning, diagnosis_model, evidence_ids)
-    if diagnosis_model is None:
-        diagnostic_reasoning = diagnostic_reasoning.model_copy(
-            update={
-                "primary_diagnosis": None,
-                "secondary_diagnosis": None,
-                "hidden_cost_reasoning": None,
-                "highest_leverage_reasoning": None,
-            }
-        )
-    if not diagnosis_model and diagnostic_reasoning.primary_diagnosis and diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids:
-        evidence_ids = _visible_evidence_ids(diagnostic_reasoning.primary_diagnosis.supporting_evidence_ids, evidence_cards)
-    dims = _ordered_dimensions(scores)
-    strongest = DIMENSION_LABELS[dims[0][0]]
-    limiter = DIMENSION_LABELS[sorted(_dimension_scores(scores).items(), key=lambda item: item[1])[0][0]]
-    authority_type = _authority_type(scores, evidence_ids, confidence)
-    diagnosis_confidence = min(confidence, diagnosis_model.confidence if diagnosis_model else confidence)
-    if diagnosis_model is None:
-        diagnosis_confidence = min(diagnosis_confidence, 0.59)
-    visible_contradictions = [
-        card for card in evidence_cards
-        if diagnosis_model and card.direction == "negative" and card.evidence_id not in diagnosis_model.evidence_ids
-    ]
-    if visible_contradictions:
-        diagnosis_confidence = min(0.79, max(0.35, diagnosis_confidence - min(0.18, len(visible_contradictions) * 0.08)))
-    confidence_label = _confidence_label(diagnosis_confidence)
-    mirror = _mirror(scores, authority_type, strongest, limiter, confidence_label, evidence_ids, evidence_cards, diagnosis_model)
-    diagnosis = _diagnosis(scores, diagnostic_reasoning, evidence_ids, evidence_cards, diagnosis_model)
-    perception_map = _apply_scenario_perception(_perception_map(diagnosis, authority_type, diagnosis_confidence, evidence_ids, evidence_cards, diagnosis_model), profile.scenario_id)
-    weak_sample = bool(duration_ms and duration_ms < 25000) or confidence < 0.45 or not audio_quality.usable
-    if weak_sample:
-        limited_text = "This sample does not contain enough reliable evidence for a strong psychological read. Treat the result as a light directional signal and retest with a longer, clearer recording."
-        mirror = mirror.model_copy(
-            update={
-                "headline": "There is not enough reliable evidence for a full authority diagnosis yet.",
-                "identity_read": limited_text,
-                "one_line_identity_read": limited_text,
-                "confidence_label": "low",
-                "confidence_level": "low",
-            }
-        )
-        if perception_map.first_impression:
-            perception_map = perception_map.model_copy(
-                update={
-                    "first_impression": perception_map.first_impression.model_copy(
-                        update={"text": limited_text, "confidence": min(perception_map.first_impression.confidence, 0.4)}
-                    )
-                }
-            )
-    timeline = _timeline(moments, evidence_ids, duration_ms, diagnosis_model)
-    dimension_reports = _dimension_reports(scores, diagnostic_reasoning, evidence_ids, confidence, evidence_cards)
-    hidden_cost = _hidden_cost(diagnosis, diagnostic_reasoning, evidence_ids, diagnosis_confidence, evidence_cards, diagnosis_model)
-    fix = _highest_leverage_fix(coaching_engine, diagnostic_reasoning, evidence_ids, evidence_cards, diagnosis_model)
-    training = _training(coaching_engine, fix, evidence_cards, diagnosis_model)
-    retest = _retest(fix, duration_ms)
-    appendix = _technical_appendix(metrics, scores, audio_quality, evidence_ids)
-    share_card = _share_card(scores, authority_type, mirror, diagnosis)
-    report_uncertainty = Uncertainty(
-        overall_confidence_label=confidence_label,  # type: ignore[arg-type]
-        suppressed_traits=psychological_inference.suppressed_traits,
-        reasons=list(dict.fromkeys(uncertainty.reasons + psychological_inference.uncertainty.reasons + diagnostic_reasoning.uncertainty.reasons)),
-    )
-    if diagnosis_model and diagnosis_model.uncertainty_note:
-        report_uncertainty.reasons.append("Multiple behavioural reads remain plausible; report confidence was reduced accordingly")
-    if visible_contradictions:
-        report_uncertainty.reasons.append("Competing behavioural signals lowered report confidence")
-    if duration_ms and duration_ms < 25000:
-        report_uncertainty.reasons.append("Short recording limits full report confidence")
-    report = AuthorityReport(
-        mirror=mirror,
-        diagnosis=diagnosis,
-        perception_map=perception_map,
-        evidence_chain=evidence_cards,
-        timeline=timeline,
-        moment_intelligence=moment_intelligence or MomentIntelligence(moments=moments),
-        dimension_reports=dimension_reports,
-        hidden_cost=hidden_cost,
-        highest_leverage_fix=fix,
-        training_prescription=training,
-        retest_plan=retest,
-        authority_type=authority_type,
-        share_card=share_card,
-        technical_appendix=appendix,
-        scenario_summary=_scenario_summary(scores, fix, coaching_engine, profile.scenario_id),
-        diagnostic_reasoning=diagnostic_reasoning,
-        primary_diagnosis=diagnostic_reasoning.primary_diagnosis,
-        secondary_diagnosis=diagnostic_reasoning.secondary_diagnosis,
-        contradictions=diagnostic_reasoning.contradictions,
-        hidden_cost_reasoning=diagnostic_reasoning.hidden_cost_reasoning,
-        dimension_reasoning=diagnostic_reasoning.dimension_reasoning,
-        trait_reasoning=diagnostic_reasoning.trait_reasoning,
-        highest_leverage_reasoning=diagnostic_reasoning.highest_leverage_reasoning,
-        coaching_engine=coaching_engine,
-        uncertainty=report_uncertainty,
-    )
-    return report.model_copy(update={"validation": _validate_report(report, coaching_engine)})

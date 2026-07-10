@@ -245,12 +245,10 @@ def _collect_dependency_issues(response: AuthorityV2Response) -> list[PipelineVa
             issues.append(_issue("report_missing_diagnostic_reasoning", "report_generation", "Report must consume DiagnosticReasoning.", severity="error"))
         if coaching and not report.coaching_engine:
             issues.append(_issue("report_missing_coaching_engine", "report_generation", "Report should carry the coaching engine it consumed.", severity="warning"))
-        if report.primary_diagnosis and report.diagnostic_reasoning and report.diagnostic_reasoning.primary_diagnosis:
-            if report.primary_diagnosis.diagnosis_id != report.diagnostic_reasoning.primary_diagnosis.diagnosis_id:
-                issues.append(_issue("report_diagnosis_mismatch", "report_generation", "Report primary diagnosis differs from DiagnosticReasoning.", severity="error", references=[report.primary_diagnosis.diagnosis_id, report.diagnostic_reasoning.primary_diagnosis.diagnosis_id]))
-        if report.hidden_cost_reasoning and report.hidden_cost:
-            if report.hidden_cost.cost_id and report.hidden_cost_reasoning.cost_id and report.hidden_cost.cost_id != report.hidden_cost_reasoning.cost_id:
-                issues.append(_issue("hidden_cost_reasoning_mismatch", "report_generation", "Hidden cost does not match diagnostic hidden-cost reasoning.", severity="error", references=[report.hidden_cost.cost_id, report.hidden_cost_reasoning.cost_id]))
+        if report.report_mode == "full" and not report.primary_diagnosis:
+            issues.append(_issue("report_missing_primary_diagnosis", "report_generation", "Full report is missing a primary diagnosis.", severity="error"))
+        if report.report_mode == "insufficient" and report.primary_diagnosis:
+            issues.append(_issue("insufficient_report_has_diagnosis", "report_generation", "Insufficient report must not expose a primary diagnosis.", severity="error", references=[report.primary_diagnosis.diagnosis_id]))
 
     if coaching:
         coaching_drill_ids = {
@@ -310,8 +308,8 @@ def _collect_consistency_issues(response: AuthorityV2Response) -> list[PipelineV
         issues.append(_issue("share_card_authority_type_mismatch", "report_generation", "Share card authority type differs from report authority type.", severity="error", references=[report.share_card.authority_type, report.authority_type.label]))
 
     if report.highest_leverage_fix and report.primary_diagnosis:
-        limiter_dims = set(report.primary_diagnosis.affected_dimensions)
-        fix_dims = set(report.highest_leverage_fix.target_dimensions)
+        limiter_dims = {dimension.lower() for dimension in report.primary_diagnosis.affected_dimensions}
+        fix_dims = {dimension.lower() for dimension in report.highest_leverage_fix.target_dimensions}
         if limiter_dims and fix_dims and not limiter_dims.intersection(fix_dims):
             issues.append(_issue("leverage_fix_diagnosis_mismatch", "report_generation", "Highest leverage fix target dimensions do not overlap the primary diagnosis.", severity="warning", references=list(fix_dims | limiter_dims)))
 

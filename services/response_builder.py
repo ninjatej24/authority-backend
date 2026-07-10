@@ -767,6 +767,7 @@ def run_analysis(
     metric_evidence_payload = serialize_evidence_collection(evidence_collection)
 
     response = AuthorityV2Response(
+        report_mode=report.report_mode,
         request=RequestMetadata(
             scenario=_map_scenario(request.context),
             prompt_id=_prompt_id(request),
